@@ -1,0 +1,15 @@
+.env
+*.env
+venv/
+__pycache__/
+logs/
+*.py[cod]
+orders.db
+*.db
+help_telegraph_token.txt
+help_telegraph_url.txt
+help_telegraph_bad_check.json
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

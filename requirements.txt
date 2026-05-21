@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+aiogram
+python-dotenv
+aiohttp
+pydantic
+requests
+tonsdk
+selenium
