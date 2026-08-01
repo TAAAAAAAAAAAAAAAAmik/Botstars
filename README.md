@@ -1,0 +1,260 @@
+# AraStars
+
+Telegram-сервис продажи Telegram Stars: покупка через Fragment с TON-кошелька,
+внутренний баланс, пятиуровневая реферальная программа и автосверка платежей
+по выписке Ozon.
+
+## Состав
+
+| Файл | Назначение |
+|---|---|
+| `main.py` | FastAPI-бэкенд: заказы, балансы, рефералы, автосверка платежей |
+| `bot.py` | Telegram-бот: клиентская часть + подключение админ-панели |
+| `admin_panel.py` | Админ-панель (роутер внутри бота), доступна только владельцу |
+| `fragment_service.py` | Покупка звёзд на Fragment и переводы TON |
+| `common.py` | Общие утилиты: экранирование HTML, работа с деньгами и датами |
+| `tests/` | Тесты авторизации, балансов, рефералов и лимитов кошелька |
+
+Процессов два: `ara-backend` и `ara-client-bot`. Отдельного админ-бота больше
+нет — панель встроена в основной бот и открывается командой `/admin`.
+
+---
+
+## Быстрый старт на сервере через Termius
+
+[Termius](https://termius.com) — SSH-клиент (есть на iOS, Android, Windows,
+macOS). Он даёт терминал вашего сервера; все команды ниже выполняются в нём.
+
+### 1. Подключиться к серверу
+
+1. Откройте Termius → **Hosts** → **+ New Host**.
+2. Заполните:
+   - **Label** — любое имя, например `AraStars`
+   - **Address** — IP вашего VPS (например `185.12.34.56`)
+   - **Port** — `22`
+   - **Username** — `root`
+   - **Password** — пароль от сервера (или подключите SSH-ключ в разделе *Keys*)
+3. Сохраните и нажмите на хост — откроется терминал.
+
+> Совет: вместо пароля надёжнее ключ. Termius → **Keys** → **+** → *Generate key*,
+> затем в настройках хоста выберите его в поле **Key**.
+
+### 2. Установить систему (один раз)
+
+```bash
+apt update && apt install -y python3 python3-venv python3-pip git chromium-browser
+```
+
+### 3. Загрузить код
+
+```bash
+cd /root
+git clone https://github.com/TAAAAAAAAAAAAAAAAmik/Botstars.git AraStars
+cd /root/AraStars
+```
+
+Если папка уже есть — просто обновитесь:
+
+```bash
+cd /root/AraStars && git pull
+```
+
+### 4. Создать окружение и поставить зависимости
+
+```bash
+cd /root/AraStars
+python3 -m venv venv
+./venv/bin/pip install --upgrade pip
+./venv/bin/pip install -r requirements.txt
+```
+
+### 5. Заполнить `.env`
+
+Сначала сгенерируйте два разных токена — они защищают бэкенд:
+
+```bash
+cd /root/AraStars
+echo "BACKEND_SERVICE_TOKEN=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')"
+echo "BACKEND_ADMIN_TOKEN=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')"
+```
+
+Скопируйте вывод, затем создайте конфиг:
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Заполните обязательное:
+
+- `BOT_TOKEN` — токен от [@BotFather](https://t.me/BotFather)
+- `BOT_USERNAME` — username бота без `@`
+- `ADMIN_CHAT_ID` — `6887373040` (уже стоит по умолчанию)
+- `BACKEND_SERVICE_TOKEN` и `BACKEND_ADMIN_TOKEN` — из команды выше
+- `FRAGMENT_*` — данные Fragment и сид-фраза кошелька
+- `CARD_NUMBER`, `CARD_HOLDER` — реквизиты для оплаты
+
+В `nano`: сохранить — `Ctrl+O`, `Enter`; выйти — `Ctrl+X`.
+
+Закройте файл от посторонних:
+
+```bash
+chmod 600 /root/AraStars/.env
+```
+
+> ⚠️ Сохраните `FRAGMENT_WALLET_MNEMONIC` где-то вне сервера. Потеряете сервер —
+> потеряете кошелёк.
+
+### 6. Проверить, что всё собирается
+
+```bash
+cd /root/AraStars
+./venv/bin/python -m pytest tests/ -q
+```
+
+Должно быть `36 passed`.
+
+### 7. Запустить как сервисы
+
+```bash
+cd /root/AraStars
+cp ara-backend.service ara-client-bot.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now ara-backend ara-client-bot
+```
+
+Проверить статус:
+
+```bash
+systemctl status ara-backend ara-client-bot
+```
+
+Зелёная надпись `active (running)` — всё работает. Откройте бота в Telegram
+и отправьте `/start`, затем `/admin`.
+
+---
+
+## Управление сервисами
+
+```bash
+# Логи в реальном времени (выход — Ctrl+C)
+journalctl -u ara-client-bot -f
+journalctl -u ara-backend -f
+
+# Последние 100 строк
+journalctl -u ara-backend -n 100 --no-pager
+
+# Перезапуск после изменений
+systemctl restart ara-backend ara-client-bot
+
+# Остановить
+systemctl stop ara-client-bot
+
+# Обновить код и перезапустить
+cd /root/AraStars && git pull && ./venv/bin/pip install -r requirements.txt \
+  && systemctl restart ara-backend ara-client-bot
+```
+
+### Ручной запуск для отладки
+
+Если сервис падает и хочется увидеть ошибку сразу:
+
+```bash
+cd /root/AraStars
+systemctl stop ara-client-bot
+./venv/bin/python bot.py
+```
+
+Остановить — `Ctrl+C`, потом вернуть сервис: `systemctl start ara-client-bot`.
+
+> Termius закрывает сессию при сворачивании приложения. Для долгих задач
+> используйте `tmux`: `apt install -y tmux`, затем `tmux` для старта,
+> `Ctrl+B` затем `D` — свернуть, `tmux attach` — вернуться.
+
+---
+
+## Админ-панель
+
+Доступна **только** пользователю с ID `6887373040` — проверка стоит на уровне
+роутера, а не в каждом обработчике.
+
+Команда `/admin` открывает меню:
+
+| Раздел | Что делает |
+|---|---|
+| 📊 Статистика | Обороты, прибыль, заказы по периодам |
+| 💰 Цены | Изменение цен за звезду |
+| 💵 Курс доллара | Курс для расчёта себестоимости |
+| 👤 Пользователи | Поиск по ID, username или имени |
+| 💳 Баланс | Ручная корректировка баланса |
+| 🚫 Blacklist | Блокировка пользователя |
+| 📣 Рассылка | Текст, фото или видео всем пользователям |
+| 🏆 Топ рефералов | Партнёры по обороту |
+| 🛠 Ozon | Статус автосверки и обновление cookies |
+| 🚨 Разбор | Заказы, где TON ушли, но выдача не завершена |
+
+Команды: `/admin`, `/approve ID`, `/reject ID`, `/toprefs`, `/review`, `/ozon`.
+
+Все остальные функции бота у админа работают как у обычного пользователя —
+админ-роутер перехватывает только свои команды.
+
+---
+
+## Безопасность
+
+Что защищает деньги в этой конфигурации:
+
+- **Бэкенд слушает только `127.0.0.1`.** Наружу он не смотрит, всё общение —
+  между процессами на одной машине.
+- **Все ручки требуют токен.** Публичны только `/` и `/health`. Админские
+  операции требуют отдельный, более сильный токен.
+- **Лимиты на переводы TON.** Сумма, которую называет Fragment, проверяется
+  до отправки: по сообщению, по заказу и по количеству звёзд.
+- **Подтверждение переводов.** Заказ помечается выданным только после того,
+  как сеть подтвердила рост seqno кошелька.
+- **Защита от двойного списания.** Баланс меняется в транзакции
+  `BEGIN IMMEDIATE` условным `UPDATE ... WHERE balance >= ?`.
+- **Экранирование HTML.** Имя пользователя не может сломать или подделать
+  уведомление админу.
+- **Статус `needs_review`.** Если TON ушли, а заказ не завершился, деньги
+  не возвращаются автоматически — заказ попадает в раздел «🚨 Разбор».
+
+### Если утекли секреты
+
+```bash
+# 1. Новый токен бота — у @BotFather командой /revoke
+# 2. Новые токены бэкенда:
+python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+# 3. Впишите в .env, затем:
+systemctl restart ara-backend ara-client-bot
+```
+
+Сид-фразу кошелька так не отозвать — переводите средства на новый кошелёк.
+
+---
+
+## Диагностика
+
+| Симптом | Причина и решение |
+|---|---|
+| `BACKEND_SERVICE_TOKEN не задан` | Не заполнен `.env`. См. шаг 5 |
+| Бот не отвечает | `journalctl -u ara-client-bot -n 50 --no-pager` |
+| `401 Unauthorized` в логах | Токены в `.env` не совпадают у бота и бэкенда |
+| `/admin` не открывается | `ADMIN_CHAT_ID` в `.env` не равен вашему Telegram ID |
+| Платежи не находятся | `/admin` → 🛠 Ozon: обновите cookies |
+| `database is locked` | Проверьте, что запущен один экземпляр бэкенда |
+| Заказ в «🚨 Разбор» | TON ушли, выдача не подтверждена. Проверьте кошелёк вручную |
+
+Узнать свой Telegram ID: напишите [@userinfobot](https://t.me/userinfobot).
+
+---
+
+## Разработка
+
+```bash
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+./venv/bin/python -m pytest tests/ -q
+```
+
+Тесты не ходят в сеть и работают на временной базе.

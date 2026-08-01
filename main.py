@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -6,6 +7,8 @@ import random
 import re
 import secrets
 import sqlite3
+import tempfile
+import threading
 import time
 import uuid
 from http.cookies import SimpleCookie
@@ -16,10 +19,13 @@ from typing import Optional
 import aiohttp
 import requests
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from common import esc, parse_iso_datetime, username_text
 from fragment_service import (
+    FragmentFundsSentError,
     auto_buy_stars,
     make_session,
     normalize_recipient,
@@ -30,14 +36,37 @@ load_dotenv(dotenv_path=".env")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AraStars Backend")
-
 DB_PATH = os.getenv("ORDERS_DB_PATH", "orders.db").strip() or "orders.db"
 REFERRAL_MIN_WITHDRAW = float(os.getenv("REFERRAL_MIN_WITHDRAW", "500").strip() or 500)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN", "").strip()
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
-BACKEND_ADMIN_TOKEN = os.getenv("BACKEND_ADMIN_TOKEN", ADMIN_BOT_TOKEN).strip()
+# ID владельца: сюда уходят уведомления о заказах и о заказах на разборе.
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "6887373040").strip() or "6887373040"
+
+# Два независимых секрета. Раньше админ-токен по умолчанию равнялся токену
+# Telegram-бота: утечка токена бота означала полный админ-доступ к бэкенду.
+# Теперь оба обязательны и задаются явно.
+BACKEND_SERVICE_TOKEN = os.getenv("BACKEND_SERVICE_TOKEN", "").strip()
+BACKEND_ADMIN_TOKEN = os.getenv("BACKEND_ADMIN_TOKEN", "").strip()
+
+if not BACKEND_SERVICE_TOKEN:
+    raise RuntimeError(
+        "BACKEND_SERVICE_TOKEN не задан в .env. Сгенерируйте: python3 -c "
+        "\"import secrets; print(secrets.token_urlsafe(48))\""
+    )
+if not BACKEND_ADMIN_TOKEN:
+    raise RuntimeError(
+        "BACKEND_ADMIN_TOKEN не задан в .env. Сгенерируйте: python3 -c "
+        "\"import secrets; print(secrets.token_urlsafe(48))\""
+    )
+if BACKEND_ADMIN_TOKEN == BACKEND_SERVICE_TOKEN:
+    raise RuntimeError("BACKEND_ADMIN_TOKEN и BACKEND_SERVICE_TOKEN должны различаться")
+if BOT_TOKEN and BACKEND_ADMIN_TOKEN == BOT_TOKEN:
+    raise RuntimeError("BACKEND_ADMIN_TOKEN не должен совпадать с токеном Telegram-бота")
+
+# Бэкенд обязан слушать только localhost. Если явно выставили внешний адрес,
+# требуем осознанного подтверждения — иначе денежные ручки окажутся в интернете.
+BACKEND_ALLOW_PUBLIC_BIND = os.getenv("BACKEND_ALLOW_PUBLIC_BIND", "false").strip().lower() in {"1", "true", "yes", "on"}
+
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@AraStarsS_Manager").strip() or "@AraStarsS_Manager"
 OZON_COOKIES_JSON = os.getenv("OZON_COOKIES_JSON", "").strip()
 OZON_USE_SELENIUM = os.getenv("OZON_USE_SELENIUM", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -52,6 +81,8 @@ OZON_COOKIE_KEEPALIVE_JITTER_SECONDS = int(os.getenv("OZON_COOKIE_KEEPALIVE_JITT
 OZON_COOKIE_SAVE_MIN_INTERVAL_SECONDS = int(os.getenv("OZON_COOKIE_SAVE_MIN_INTERVAL_SECONDS", "300").strip() or 300)
 OZON_OPERATIONS_PER_PAGE = int(os.getenv("OZON_OPERATIONS_PER_PAGE", "30").strip() or 30)
 OZON_SELENIUM_TIMEOUT_SECONDS = int(os.getenv("OZON_SELENIUM_TIMEOUT_SECONDS", "45").strip() or 45)
+# PIN только из окружения. Раньше здесь был запасной хардкод "7910" —
+# боевой секрет, попавший в git.
 OZON_PIN = os.getenv("OZON_PIN", "").strip()
 OZON_PIN_WAIT_SECONDS = int(os.getenv("OZON_PIN_WAIT_SECONDS", "12").strip() or 12)
 ADMIN_STATS_CACHE_TTL_SECONDS = float(os.getenv("ADMIN_STATS_CACHE_TTL_SECONDS", "10").strip() or 10)
@@ -136,6 +167,61 @@ NETWORK_REFERRAL_LEVELS = [
     {"level": 5, "name": "5 уровень", "percent": 10, "min_turnover": 26000, "next_turnover": None},
 ]
 MAX_REFERRAL_CHAIN_DEPTH = 5
+# Потолок суммарной реферальной выплаты в процентах от маржи заказа.
+# Без него сумма процентов по цепочке доходила до 130% и заказ уходил в минус.
+REFERRAL_MAX_PAYOUT_PERCENT = float(os.getenv("REFERRAL_MAX_PAYOUT_PERCENT", "90").strip() or 90)
+
+
+@contextlib.asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Запуск и остановка фоновых задач (замена устаревшего @app.on_event)."""
+    global PAYMENT_WATCHER_TASK, OZON_COOKIE_KEEPALIVE_TASK
+    init_db()
+    if PAYMENT_WATCHER_TASK is None:
+        PAYMENT_WATCHER_TASK = asyncio.create_task(ozon_payment_watcher_loop())
+    if OZON_COOKIE_KEEPALIVE_TASK is None:
+        OZON_COOKIE_KEEPALIVE_TASK = asyncio.create_task(ozon_cookie_keepalive_loop())
+    try:
+        yield
+    finally:
+        for task_name in ("PAYMENT_WATCHER_TASK", "OZON_COOKIE_KEEPALIVE_TASK"):
+            task = globals().get(task_name)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                globals()[task_name] = None
+        await asyncio.to_thread(close_ozon_selenium_driver)
+
+
+app = FastAPI(title="AraStars Backend", lifespan=lifespan)
+
+# Ручки, доступные без токена. Всё остальное закрыто по умолчанию —
+# раньше публичными были в том числе списание баланса и создание заявки
+# на вывод, то есть увести деньги мог любой, кто знал telegram_user_id.
+PUBLIC_PATHS = {"/", "/health"}
+
+
+@app.middleware("http")
+async def require_service_token_middleware(request: Request, call_next):
+    if request.url.path not in PUBLIC_PATHS:
+        provided = request.headers.get("X-Backend-Token") or ""
+        # Админский токен подходит везде, сервисный — только к не-админским
+        # ручкам (их дополнительно проверяет require_admin_token).
+        valid = secrets.compare_digest(provided, BACKEND_SERVICE_TOKEN) or secrets.compare_digest(
+            provided, BACKEND_ADMIN_TOKEN
+        )
+        if not valid:
+            logger.warning(
+                "Отклонён запрос без валидного токена: %s %s от %s",
+                request.method,
+                request.url.path,
+                request.client.host if request.client else "unknown",
+            )
+            return JSONResponse(status_code=401, content={"ok": False, "detail": "Unauthorized"})
+    return await call_next(request)
 
 
 class OrderStatus(str, Enum):
@@ -143,6 +229,9 @@ class OrderStatus(str, Enum):
     payment_pending = "payment_pending"
     paid = "paid"
     failed = "failed"
+    # Средства ушли в блокчейн, но заказ не завершён. Автоматика такие заказы
+    # не трогает: и повтор покупки, и возврат денег здесь одинаково опасны.
+    needs_review = "needs_review"
 
 
 class WithdrawalStatus(str, Enum):
@@ -319,7 +408,17 @@ def parse_ozon_cookie_input(raw: str) -> dict[str, str]:
 
 
 def update_env_file_values(updates: dict[str, str]) -> None:
+    """Атомарно обновляет .env.
+
+    Раньше файл открывался на запись напрямую: сбой в этот момент обнулял
+    .env вместе с мнемоникой кошелька. Теперь пишем во временный файл и
+    подменяем через os.replace, предварительно сняв резервную копию.
+    """
     env_path = ".env"
+    for key, value in updates.items():
+        if "\n" in str(value) or "\r" in str(value):
+            raise HTTPException(status_code=400, detail=f"Value for {key} must not contain newlines")
+
     try:
         with open(env_path, "r", encoding="utf-8") as file:
             lines = file.read().splitlines()
@@ -339,8 +438,27 @@ def update_env_file_values(updates: dict[str, str]) -> None:
     for key, value in updates.items():
         if key not in seen:
             updated_lines.append(f"{key}={value}")
-    with open(env_path, "w", encoding="utf-8", newline="\n") as file:
-        file.write("\n".join(updated_lines) + "\n")
+
+    if lines:
+        try:
+            with open(f"{env_path}.bak", "w", encoding="utf-8", newline="\n") as backup:
+                backup.write("\n".join(lines) + "\n")
+        except OSError:
+            logger.exception("Не удалось создать резервную копию .env")
+
+    directory = os.path.dirname(os.path.abspath(env_path)) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".env.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as tmp_file:
+            tmp_file.write("\n".join(updated_lines) + "\n")
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, env_path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
 
 
 def apply_ozon_runtime_config(cookies_json: str, use_selenium: bool) -> None:
@@ -388,7 +506,6 @@ def save_ozon_cookies_from_driver(driver, *, force: bool = False) -> int:
             {
                 "OZON_COOKIES_JSON": cookies_json,
                 "OZON_USE_SELENIUM": "true" if OZON_USE_SELENIUM else "false",
-                "OZON_PIN": OZON_PIN or "7910",
             }
         )
         apply_ozon_runtime_config(cookies_json, OZON_USE_SELENIUM)
@@ -455,18 +572,7 @@ def make_operation_id(operation: dict) -> str:
 
 
 def parse_ozon_time(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    raw = str(value).strip()
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+    return parse_iso_datetime(value)
 
 
 def normalize_payment_text(value: str | None) -> str:
@@ -505,15 +611,6 @@ def operation_matches_payment(operation: dict, payment: dict) -> bool:
             return False
 
     return operation_has_comment(operation, str(payment.get("payment_comment") or ""))
-
-
-def parse_iso_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
 
 
 def is_future_iso(value: str | None) -> bool:
@@ -574,12 +671,20 @@ def get_settings_dict(conn: sqlite3.Connection) -> dict[str, str]:
 
 
 def get_price_settings_dict(conn: sqlite3.Connection) -> dict[str, str]:
+    """Настройки, безопасные для клиентского бота.
+
+    Клиентскому боту больше не нужен админский токен ради цен: он читает
+    этот срез, а не весь /admin/settings.
+    """
     settings = get_settings_dict(conn)
     return {
         "price_50_99": settings["price_50_99"],
         "price_100_4999": settings["price_100_4999"],
         "price_5000_plus": settings["price_5000_plus"],
         "sale_price_per_star": settings["sale_price_per_star"],
+        "usd_rate": settings["usd_rate"],
+        "tonviewer_url": settings["tonviewer_url"],
+        "referral_info_url": settings["referral_info_url"],
     }
 
 
@@ -619,10 +724,47 @@ def calculate_order_profit(conn: sqlite3.Connection, order: dict) -> dict[str, f
     }
 
 
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+DB_TIMEOUT_SECONDS = float(os.getenv("DB_TIMEOUT_SECONDS", "15").strip() or 15)
+
+
+def _configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(f"PRAGMA busy_timeout = {int(DB_TIMEOUT_SECONDS * 1000)}")
     return conn
+
+
+def get_db() -> sqlite3.Connection:
+    """Соединение с SQLite, настроенное под конкурентную работу.
+
+    Фоновый watcher пишет в базу параллельно с API. Без WAL и busy_timeout
+    это стабильно даёт "database is locked". Режим транзакций оставлен
+    штатным, чтобы существующие conn.commit() продолжали работать атомарно.
+    """
+    return _configure_connection(sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT_SECONDS))
+
+
+@contextlib.contextmanager
+def db_write():
+    """Транзакция на запись с BEGIN IMMEDIATE.
+
+    IMMEDIATE берёт блокировку записи сразу, поэтому связка «прочитали баланс →
+    проверили → записали баланс» перестаёт быть гонкой: параллельная транзакция
+    ждёт освобождения, а не читает устаревшее значение и не списывает второй раз.
+    """
+    conn = _configure_connection(sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT_SECONDS, isolation_level=None))
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
 
 
 def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
@@ -839,6 +981,26 @@ def create_tables(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "referral_transactions", "stars_amount", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(conn, "referral_transactions", "stars_cost_rub", "REAL NOT NULL DEFAULT 0")
     ensure_column(conn, "referral_transactions", "base_profit", "REAL NOT NULL DEFAULT 0")
+
+    # Индексов не было ни одного: каждый запрос по telegram_user_id или
+    # paid_operation_id читал таблицу целиком, а watcher делает это каждые 15 с.
+    for index_sql in (
+        "CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(telegram_user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)",
+        "CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_orders_paid_op ON orders(paid_operation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_users_invited_by ON users(invited_by_user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_users_ref_code ON users(ref_code)",
+        "CREATE INDEX IF NOT EXISTS idx_reftx_referrer ON referral_transactions(referrer_user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_reftx_source_order ON referral_transactions(source_order_id)",
+        "CREATE INDEX IF NOT EXISTS idx_withdrawals_user ON withdrawal_requests(telegram_user_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_topups_user ON balance_topup_requests(telegram_user_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_topups_paid_op ON balance_topup_requests(paid_operation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_saleaccess_user ON sale_access_requests(telegram_user_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_saleaccess_paid_op ON sale_access_requests(paid_operation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_baltx_user ON balance_transactions(telegram_user_id)",
+    ):
+        conn.execute(index_sql)
 
     now = now_iso()
     for key, value in DEFAULT_SETTINGS.items():
@@ -1818,17 +1980,40 @@ def process_referral_reward(conn: sqlite3.Connection, order: dict) -> dict | Non
     referrers: list[dict] = []
     current_referral_user = buyer
     current_referrer_id = int(inviter_id)
+    # Цепочка A→B→A раньше начисляла одному и тому же человеку несколько раз.
+    seen_referrers: set[int] = {int(buyer["telegram_user_id"])}
+    # Суммарная выплата по цепочке не должна превышать долю от маржи:
+    # 90% прямому + до 10% на каждом из четырёх сетевых уровней давали 130%,
+    # то есть заказ мог уходить в убыток.
+    reward_budget = normalize_amount(base_profit * REFERRAL_MAX_PAYOUT_PERCENT / 100)
+    paid_so_far = 0.0
 
     for depth in range(1, MAX_REFERRAL_CHAIN_DEPTH + 1):
+        if current_referrer_id in seen_referrers:
+            logger.warning(
+                "Реферальный цикл на заказе %s: пользователь %s уже получил награду",
+                order["id"],
+                current_referrer_id,
+            )
+            break
         referrer_row = get_user_row(conn, current_referrer_id)
         if referrer_row is None:
             break
+        seen_referrers.add(current_referrer_id)
         referrer = row_to_user(referrer_row)
 
         before_direct_level = get_level_by_turnover(referrer["ref_total_turnover"], referrer["custom_ref_percent"])
         reward_level = before_direct_level if depth == 1 else get_network_level_by_turnover(referrer["ref_total_turnover"])
         percent_used = float(reward_level["percent"])
         reward_amount = normalize_amount(base_profit * percent_used / 100)
+
+        remaining_budget = normalize_amount(reward_budget - paid_so_far)
+        if remaining_budget <= 0:
+            break
+        if reward_amount > remaining_budget:
+            reward_amount = remaining_budget
+            percent_used = round(reward_amount * 100 / base_profit, 4) if base_profit else 0.0
+        paid_so_far = normalize_amount(paid_so_far + reward_amount)
         new_available = normalize_amount(referrer["ref_balance_available"] + reward_amount)
         new_turnover = normalize_amount(referrer["ref_total_turnover"] + amount)
         after_direct_level = get_level_by_turnover(new_turnover, referrer["custom_ref_percent"])
@@ -2406,8 +2591,10 @@ def process_balance_order(payload: BalanceOrderCreateRequest) -> dict:
     order = create_balance_order_payload(payload)
     purchase_tx_id = str(uuid.uuid4())
 
-    conn = get_db()
-    try:
+    # Списание баланса выполняется в транзакции BEGIN IMMEDIATE с условным
+    # UPDATE. Раньше баланс читался, проверялся и записывался вне транзакции:
+    # два параллельных запроса видели одну и ту же сумму и списывали дважды.
+    with db_write() as conn:
         user = ensure_user_record(
             conn,
             telegram_user_id=payload.telegram_user_id,
@@ -2420,14 +2607,18 @@ def process_balance_order(payload: BalanceOrderCreateRequest) -> dict:
         order["amount_rub"] = current_amount
         order["amount"] = current_amount
         order["balance_charge_amount"] = current_amount
-        if float(user["balance"]) < float(order["amount_rub"]):
-            raise HTTPException(status_code=400, detail="Insufficient balance")
 
-        new_balance = normalize_amount(float(user["balance"]) - float(order["amount_rub"]))
-        conn.execute(
-            "UPDATE users SET balance = ?, updated_at = ? WHERE telegram_user_id = ?",
-            (new_balance, now_iso(), payload.telegram_user_id),
+        charge = normalize_amount(order["amount_rub"])
+        cursor = conn.execute(
+            """
+            UPDATE users
+            SET balance = ROUND(balance - ?, 2), updated_at = ?
+            WHERE telegram_user_id = ? AND balance >= ?
+            """,
+            (charge, now_iso(), payload.telegram_user_id, charge),
         )
+        if cursor.rowcount != 1:
+            raise HTTPException(status_code=400, detail="Insufficient balance")
         conn.execute(
             """
             INSERT INTO orders (
@@ -2477,21 +2668,29 @@ def process_balance_order(payload: BalanceOrderCreateRequest) -> dict:
                 now_iso(),
             ),
         )
-        conn.commit()
-    finally:
-        conn.close()
 
     try:
         fragment_result = auto_buy_stars(recipient_username, int(payload.stars_amount))
-    except Exception as exc:
-        conn = get_db()
-        try:
-            user_row = get_user_row(conn, payload.telegram_user_id)
-            current_user = row_to_user(user_row)
-            refunded_balance = normalize_amount(float(current_user["balance"]) + float(order["amount_rub"]))
+    except FragmentFundsSentError as exc:
+        # TON уже ушли в сеть. Возврат баланса здесь означал бы, что клиент
+        # получил и звёзды, и деньги обратно. Заказ уходит на ручной разбор.
+        with db_write() as conn:
             conn.execute(
-                "UPDATE users SET balance = ?, updated_at = ? WHERE telegram_user_id = ?",
-                (refunded_balance, now_iso(), payload.telegram_user_id),
+                "UPDATE orders SET fragment_error = ?, status = ?, updated_at = ? WHERE id = ?",
+                (f"FUNDS_SENT_NEEDS_REVIEW: {exc}", OrderStatus.needs_review.value, now_iso(), order["id"]),
+            )
+            update_balance_transaction_status(conn, purchase_tx_id, "needs_review")
+        await_admin_review_notice(order["id"], str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Purchase requires manual review, funds were NOT refunded automatically: {exc}",
+        ) from exc
+    except Exception as exc:
+        with db_write() as conn:
+            # Возврат тем же условным UPDATE, без чтения-записи через Python.
+            conn.execute(
+                "UPDATE users SET balance = ROUND(balance + ?, 2), updated_at = ? WHERE telegram_user_id = ?",
+                (normalize_amount(order["amount_rub"]), now_iso(), payload.telegram_user_id),
             )
             conn.execute(
                 "UPDATE orders SET fragment_error = ?, status = ?, updated_at = ? WHERE id = ?",
@@ -2507,23 +2706,17 @@ def process_balance_order(payload: BalanceOrderCreateRequest) -> dict:
                 note="Возврат за неуспешную покупку с баланса",
                 related_order_id=order["id"],
             )
-            conn.commit()
-        finally:
-            conn.close()
         raise HTTPException(status_code=500, detail=f"Balance purchase failed and funds were refunded: {exc}") from exc
 
-    conn = get_db()
-    try:
+    with db_write() as conn:
         conn.execute(
             "UPDATE orders SET fragment_result = ?, fragment_error = ?, status = ?, updated_at = ? WHERE id = ?",
             (json.dumps(fragment_result, ensure_ascii=False), None, OrderStatus.paid.value, now_iso(), order["id"]),
         )
         update_balance_transaction_status(conn, purchase_tx_id, "completed")
-        user_row = get_user_row(conn, payload.telegram_user_id)
-        current_user = row_to_user(user_row)
         conn.execute(
-            "UPDATE users SET total_spent = ?, updated_at = ? WHERE telegram_user_id = ?",
-            (normalize_amount(float(current_user["total_spent"]) + float(order["amount_rub"])), now_iso(), payload.telegram_user_id),
+            "UPDATE users SET total_spent = ROUND(total_spent + ?, 2), updated_at = ? WHERE telegram_user_id = ?",
+            (normalize_amount(order["amount_rub"]), now_iso(), payload.telegram_user_id),
         )
         order_row = conn.execute("SELECT * FROM orders WHERE id = ?", (order["id"],)).fetchone()
         updated_order = row_to_order(order_row)
@@ -2532,16 +2725,42 @@ def process_balance_order(payload: BalanceOrderCreateRequest) -> dict:
         except Exception as referral_exc:
             logger.exception("Referral reward failed for balance order %s", order["id"])
             referral_result = {"awarded": False, "error": str(referral_exc)}
-        conn.commit()
         final_user = row_to_user(get_user_row(conn, payload.telegram_user_id))
-        return {
-            "order": updated_order,
-            "user": final_user,
-            "fragment_result": fragment_result,
-            "referral_result": referral_result,
-        }
-    finally:
-        conn.close()
+
+    return {
+        "order": updated_order,
+        "user": final_user,
+        "fragment_result": fragment_result,
+        "referral_result": referral_result,
+    }
+
+
+def send_telegram_message_sync(token: str, chat_id: int | str, text: str) -> None:
+    """Синхронная отправка — для кода, который уже выполняется в отдельном потоке."""
+    if not token or not chat_id:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=20,
+        )
+    except Exception:
+        logger.exception("Не удалось отправить сообщение в Telegram")
+
+
+def await_admin_review_notice(order_id: str, reason: str) -> None:
+    """Срочное уведомление админа о заказе, застрявшем после отправки TON."""
+    logger.error("ЗАКАЗ %s ТРЕБУЕТ РУЧНОГО РАЗБОРА: %s", order_id, reason)
+    send_telegram_message_sync(
+        BOT_TOKEN,
+        ADMIN_CHAT_ID,
+        "🚨 <b>ЗАКАЗ ТРЕБУЕТ РУЧНОГО РАЗБОРА</b>\n\n"
+        f"🆔 <code>{esc(order_id)}</code>\n"
+        f"⚠️ <code>{esc(reason)[:900]}</code>\n\n"
+        "TON уже отправлены в сеть. Баланс НЕ возвращён автоматически.\n"
+        "Проверьте кошелёк и статус заказа на Fragment вручную.",
+    )
 
 
 async def send_telegram_message(token: str, chat_id: int | str, text: str) -> None:
@@ -2563,10 +2782,10 @@ async def notify_customer_processing(telegram_user_id: int) -> None:
 async def notify_customer_order_success(order: dict) -> None:
     text = (
         "✅ <b>Звёзды успешно отправлены</b>\n\n"
-        f"🆔 <b>ID заказа:</b> <code>{order.get('id', '—')}</code>\n"
-        f"🎁 <b>Получатель:</b> <code>{order.get('recipient_username', '—')}</code>\n"
-        f"⭐ <b>Количество:</b> <code>{order.get('stars_amount') or order.get('stars') or '—'}</code>\n\n"
-        f"Если понадобится помощь, напишите в поддержку: <code>{SUPPORT_USERNAME}</code>"
+        f"🆔 <b>ID заказа:</b> <code>{esc(order.get('id', '—'))}</code>\n"
+        f"🎁 <b>Получатель:</b> <code>{esc(order.get('recipient_username', '—'))}</code>\n"
+        f"⭐ <b>Количество:</b> <code>{esc(order.get('stars_amount') or order.get('stars') or '—')}</code>\n\n"
+        f"Если понадобится помощь, напишите в поддержку: <code>{esc(SUPPORT_USERNAME)}</code>"
     )
     await send_telegram_message(BOT_TOKEN, int(order["telegram_user_id"]), text)
 
@@ -2574,10 +2793,10 @@ async def notify_customer_order_success(order: dict) -> None:
 async def notify_customer_topup_success(topup: dict, user: dict) -> None:
     text = (
         "✅ <b>Баланс успешно пополнен</b>\n\n"
-        f"🆔 <b>ID заявки:</b> <code>{topup.get('id', '—')}</code>\n"
+        f"🆔 <b>ID заявки:</b> <code>{esc(topup.get('id', '—'))}</code>\n"
         f"💸 <b>Сумма:</b> <code>{normalize_amount(topup.get('amount')):.2f}</code> RUB\n"
         f"💳 <b>Текущий баланс:</b> <code>{normalize_amount(user.get('balance')):.2f}</code> RUB\n\n"
-        f"Если понадобится помощь, напишите в поддержку: <code>{SUPPORT_USERNAME}</code>"
+        f"Если понадобится помощь, напишите в поддержку: <code>{esc(SUPPORT_USERNAME)}</code>"
     )
     await send_telegram_message(BOT_TOKEN, int(topup["telegram_user_id"]), text)
 
@@ -2585,21 +2804,17 @@ async def notify_customer_topup_success(topup: dict, user: dict) -> None:
 async def notify_customer_sale_access_success(request: dict, user: dict) -> None:
     text = (
         "✅ <b>Доступ к продаже звёзд активирован</b>\n\n"
-        f"🆔 <b>ID заявки:</b> <code>{request.get('id', '—')}</code>\n"
-        f"📦 <b>Тариф:</b> <code>{request.get('plan_title', '—')}</code>\n"
-        f"⏰ <b>Доступ до:</b> <code>{(request.get('expires_at') or user.get('sale_access_until') or '—')}</code>\n\n"
-        f"Если понадобится помощь, напишите в поддержку: <code>{SUPPORT_USERNAME}</code>"
+        f"🆔 <b>ID заявки:</b> <code>{esc(request.get('id', '—'))}</code>\n"
+        f"📦 <b>Тариф:</b> <code>{esc(request.get('plan_title', '—'))}</code>\n"
+        f"⏰ <b>Доступ до:</b> <code>{esc(request.get('expires_at') or user.get('sale_access_until') or '—')}</code>\n\n"
+        f"Если понадобится помощь, напишите в поддержку: <code>{esc(SUPPORT_USERNAME)}</code>"
     )
     await send_telegram_message(BOT_TOKEN, int(request["telegram_user_id"]), text)
 
 
 def mention_user(user: dict | None) -> str:
-    if not user:
-        return "—"
-    username = str(user.get("telegram_username") or "").strip()
-    if username:
-        return f"@{username}"
-    return f"ID {user.get('telegram_user_id', '—')}"
+    """Безопасное упоминание пользователя (экранирует имя и username)."""
+    return username_text(user)
 
 
 async def notify_referral_reward_messages(referral_result: dict | None, order: dict) -> None:
@@ -2636,7 +2851,7 @@ async def notify_referral_reward_messages(referral_result: dict | None, order: d
             f"🔋 <b>Уровень партнера:</b> <code>{referrer.get('ref_level', tx.get('level_after', '—'))}</code>"
         )
         try:
-            await send_telegram_message(ADMIN_BOT_TOKEN, ADMIN_CHAT_ID, admin_text)
+            await send_telegram_message(BOT_TOKEN, ADMIN_CHAT_ID, admin_text)
         except Exception:
             logger.exception("Failed to notify admin about referral purchase")
 
@@ -2644,12 +2859,12 @@ async def notify_referral_reward_messages(referral_result: dict | None, order: d
 async def notify_admin_payment_error(kind: str, item_id: str, error: Exception | str) -> None:
     text = (
         "⚠️ <b>Ошибка автоматической обработки оплаты</b>\n\n"
-        f"📌 <b>Тип:</b> <code>{kind}</code>\n"
-        f"🆔 <b>ID:</b> <code>{item_id}</code>\n"
-        f"❌ <b>Ошибка:</b> <code>{str(error)}</code>"
+        f"📌 <b>Тип:</b> <code>{esc(kind)}</code>\n"
+        f"🆔 <b>ID:</b> <code>{esc(item_id)}</code>\n"
+        f"❌ <b>Ошибка:</b> <code>{esc(str(error))[:900]}</code>"
     )
     try:
-        await send_telegram_message(ADMIN_BOT_TOKEN, ADMIN_CHAT_ID, text)
+        await send_telegram_message(BOT_TOKEN, ADMIN_CHAT_ID, text)
     except Exception:
         logger.exception("Failed to notify admin about payment error")
 
@@ -2697,6 +2912,25 @@ def operation_already_used(operation_id: str) -> bool:
             if row:
                 return True
         return False
+    finally:
+        conn.close()
+
+
+def load_used_operation_ids() -> set[str]:
+    """Все уже зачтённые операции одним запросом.
+
+    Раньше проверка шла внутри двойного цикла и на каждой итерации открывала
+    новое соединение: 30 заявок × 30 операций давали ~2700 запросов каждые 15 с.
+    """
+    used: set[str] = set()
+    conn = get_db()
+    try:
+        for table_name in ("orders", "balance_topup_requests", "sale_access_requests"):
+            rows = conn.execute(
+                f"SELECT paid_operation_id FROM {table_name} WHERE paid_operation_id IS NOT NULL"
+            ).fetchall()
+            used.update(str(row[0]) for row in rows if row[0])
+        return used
     finally:
         conn.close()
 
@@ -3243,13 +3477,17 @@ async def run_ozon_payment_check_once() -> None:
             }
         )
 
+        used_operation_ids = load_used_operation_ids()
         for payment in pending:
             for operation in operations:
                 operation_id = make_operation_id(operation)
-                if operation_already_used(operation_id):
+                if operation_id in used_operation_ids:
                     continue
                 if operation_matches_payment(operation, payment):
                     await process_matched_payment(payment, operation)
+                    # Помечаем сразу, чтобы одна операция не закрыла две заявки
+                    # в пределах текущего прохода.
+                    used_operation_ids.add(operation_id)
                     matched_count += 1
                     break
         OZON_HEALTH["last_matched_count"] = matched_count
@@ -3316,37 +3554,6 @@ async def ozon_cookie_keepalive_loop() -> None:
         await asyncio.sleep(max(60, OZON_COOKIE_KEEPALIVE_INTERVAL_SECONDS) + jitter)
 
 
-init_db()
-
-
-@app.on_event("startup")
-async def startup_payment_watcher() -> None:
-    global PAYMENT_WATCHER_TASK, OZON_COOKIE_KEEPALIVE_TASK
-    if PAYMENT_WATCHER_TASK is None:
-        PAYMENT_WATCHER_TASK = asyncio.create_task(ozon_payment_watcher_loop())
-    if OZON_COOKIE_KEEPALIVE_TASK is None:
-        OZON_COOKIE_KEEPALIVE_TASK = asyncio.create_task(ozon_cookie_keepalive_loop())
-
-
-@app.on_event("shutdown")
-async def shutdown_payment_watcher() -> None:
-    global PAYMENT_WATCHER_TASK, OZON_COOKIE_KEEPALIVE_TASK
-    if PAYMENT_WATCHER_TASK is not None:
-        PAYMENT_WATCHER_TASK.cancel()
-        try:
-            await PAYMENT_WATCHER_TASK
-        except asyncio.CancelledError:
-            pass
-        PAYMENT_WATCHER_TASK = None
-    if OZON_COOKIE_KEEPALIVE_TASK is not None:
-        OZON_COOKIE_KEEPALIVE_TASK.cancel()
-        try:
-            await OZON_COOKIE_KEEPALIVE_TASK
-        except asyncio.CancelledError:
-            pass
-        OZON_COOKIE_KEEPALIVE_TASK = None
-    await asyncio.to_thread(close_ozon_selenium_driver)
-
 
 @app.get("/")
 async def root():
@@ -3357,9 +3564,6 @@ async def root():
 async def health():
     return {
         "ok": True,
-        "orders_count": count_orders(),
-        "users_count": count_users(),
-        "db_path": os.path.abspath(DB_PATH),
         "time": now_iso(),
     }
 
@@ -3417,7 +3621,6 @@ async def admin_update_ozon_cookies_endpoint(payload: AdminOzonCookiesUpdateRequ
         {
             "OZON_COOKIES_JSON": cookies_json,
             "OZON_USE_SELENIUM": "true" if use_selenium else "false",
-            "OZON_PIN": OZON_PIN or "7910",
         }
     )
     apply_ozon_runtime_config(cookies_json, use_selenium)
@@ -3817,8 +4020,20 @@ async def approve_order_internal(order_id: str):
             "already_processed": True,
         }
 
-    if order["status"] != OrderStatus.payment_pending.value:
-        raise HTTPException(status_code=409, detail="Only payment_pending orders can be approved")
+    if order["status"] == OrderStatus.needs_review.value:
+        raise HTTPException(
+            status_code=409,
+            detail="Order requires manual review: funds were already sent to the network",
+        )
+
+    # failed допускается: оплата подтверждена, а выдача сорвалась из-за сбоя
+    # Fragment. Раньше такой заказ было невозможно повторить — операция уже
+    # помечена использованной, а approve принимал только payment_pending.
+    if order["status"] not in {OrderStatus.payment_pending.value, OrderStatus.failed.value}:
+        raise HTTPException(
+            status_code=409,
+            detail="Only payment_pending or failed orders can be approved",
+        )
 
     recipient_username = str(order.get("recipient_username") or "").strip()
     stars_amount = int(order.get("stars_amount") or order.get("stars_count") or order.get("stars") or 0)
@@ -3828,9 +4043,25 @@ async def approve_order_internal(order_id: str):
     if stars_amount < 50:
         raise HTTPException(status_code=400, detail="stars_amount must be >= 50")
 
-    conn = get_db()
     try:
         fragment_result = await asyncio.to_thread(auto_buy_stars, recipient_username, stars_amount)
+    except FragmentFundsSentError as exc:
+        with db_write() as conn:
+            conn.execute(
+                "UPDATE orders SET fragment_error = ?, status = ?, updated_at = ? WHERE id = ?",
+                (f"FUNDS_SENT_NEEDS_REVIEW: {exc}", OrderStatus.needs_review.value, now_iso(), order_id),
+            )
+        await notify_admin_payment_error("order_needs_review", order_id, exc)
+        raise HTTPException(status_code=500, detail=f"Order requires manual review: {exc}") from exc
+    except Exception as exc:
+        with db_write() as conn:
+            conn.execute(
+                "UPDATE orders SET fragment_error = ?, status = ?, updated_at = ? WHERE id = ?",
+                (str(exc), OrderStatus.failed.value, now_iso(), order_id),
+            )
+        raise HTTPException(status_code=500, detail=f"Fragment auto buy failed: {exc}") from exc
+
+    with db_write() as conn:
         conn.execute(
             "UPDATE orders SET fragment_result = ?, fragment_error = ?, status = ?, updated_at = ? WHERE id = ?",
             (json.dumps(fragment_result, ensure_ascii=False), None, OrderStatus.paid.value, now_iso(), order_id),
@@ -3842,28 +4073,20 @@ async def approve_order_internal(order_id: str):
         except Exception as referral_exc:
             logger.exception("Referral reward failed for paid order %s", order_id)
             referral_result = {"awarded": False, "error": str(referral_exc)}
-        conn.commit()
-        try:
-            await notify_referral_reward_messages(referral_result, updated_order)
-        except Exception:
-            logger.exception("Failed to send referral reward notifications for order %s", order_id)
-        return {
-            "ok": True,
-            "order_id": order_id,
-            "status": updated_order["status"],
-            "order": updated_order,
-            "fragment_result": fragment_result,
-            "referral_result": referral_result,
-        }
-    except Exception as exc:
-        conn.execute(
-            "UPDATE orders SET fragment_error = ?, status = ?, updated_at = ? WHERE id = ?",
-            (str(exc), OrderStatus.failed.value, now_iso(), order_id),
-        )
-        conn.commit()
-        raise HTTPException(status_code=500, detail=f"Fragment auto buy failed: {exc}") from exc
-    finally:
-        conn.close()
+
+    try:
+        await notify_referral_reward_messages(referral_result, updated_order)
+    except Exception:
+        logger.exception("Failed to send referral reward notifications for order %s", order_id)
+
+    return {
+        "ok": True,
+        "order_id": order_id,
+        "status": updated_order["status"],
+        "order": updated_order,
+        "fragment_result": fragment_result,
+        "referral_result": referral_result,
+    }
 
 
 @app.post("/orders/{order_id}/approve")

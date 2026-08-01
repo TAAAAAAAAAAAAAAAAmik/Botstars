@@ -1,14 +1,30 @@
+# Секреты
 .env
 *.env
+!.env.example
+.env.bak
+.env.*.tmp
+
+# Окружение
 venv/
+.venv/
 __pycache__/
-logs/
 *.py[cod]
+.pytest_cache/
+
+# Данные
+logs/
 orders.db
 *.db
+*.db-wal
+*.db-shm
+ozon_chrome_profile/
+welcome_photo_file_id.txt
 help_telegraph_token.txt
 help_telegraph_url.txt
 help_telegraph_bad_check.json
+
+# Редакторы и ОС
 .idea/
 .vscode/
 .DS_Store

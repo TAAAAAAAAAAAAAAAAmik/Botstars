@@ -5,9 +5,18 @@ After=network.target
 [Service]
 User=root
 WorkingDirectory=/root/AraStars
-ExecStart=/root/AraStars/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+# ВАЖНО: только 127.0.0.1. Раньше здесь было 0.0.0.0 — денежные ручки
+# оказывались доступны из интернета, если на сервере нет фаервола.
+ExecStart=/root/AraStars/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=3
+
+# .env содержит сид-фразу кошелька — ограничиваем доступ процесса к системе
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/root/AraStars
 
 [Install]
 WantedBy=multi-user.target

@@ -1,9 +1,15 @@
-fastapi
-uvicorn[standard]
-aiogram
-python-dotenv
-aiohttp
-pydantic
-requests
-tonsdk
-selenium
+# Версии закреплены: aiogram ломает API между мажорными релизами,
+# без ограничений сборка на сервере может встать не той версией.
+aiogram>=3.13,<4.0
+fastapi>=0.115,<0.200
+uvicorn[standard]>=0.30,<1.0
+pydantic>=2.8,<3.0
+python-dotenv>=1.0,<2.0
+aiohttp>=3.9,<4.0
+requests>=2.31,<3.0
+tonsdk>=1.0.15,<2.0
+selenium>=4.20,<5.0
+
+# Тесты
+pytest>=8.0,<9.0
+httpx>=0.27,<1.0

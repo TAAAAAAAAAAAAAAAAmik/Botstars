@@ -10,7 +10,7 @@ from urllib.parse import quote_plus
 
 import aiohttp
 import requests
-from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
@@ -19,15 +19,19 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
 
+import admin_panel
+from common import esc, format_datetime_text, username_text
+
 load_dotenv(dotenv_path=".env")
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip().lstrip("@")
-ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN", "").strip()
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "6887373040").strip() or "6887373040"
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000").strip().rstrip("/")
-BACKEND_ADMIN_TOKEN = os.getenv("BACKEND_ADMIN_TOKEN", ADMIN_BOT_TOKEN).strip()
+# Клиентские запросы ходят под сервисным токеном. Админский токен нужен только
+# админ-панели и живёт в admin_panel.py.
+BACKEND_SERVICE_TOKEN = os.getenv("BACKEND_SERVICE_TOKEN", "").strip()
 
 CARD_NUMBER = os.getenv("CARD_NUMBER", "").strip()
 CARD_DISPLAY = os.getenv("CARD_DISPLAY", "").strip() or CARD_NUMBER
@@ -49,10 +53,11 @@ SALE_PRICE_PER_STAR = os.getenv("SALE_PRICE_PER_STAR", "1.20").strip() or "1.20"
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден в .env")
-if not ADMIN_BOT_TOKEN:
-    raise ValueError("ADMIN_BOT_TOKEN не найден в .env")
-if not ADMIN_CHAT_ID:
-    raise ValueError("ADMIN_CHAT_ID не найден в .env")
+if not BACKEND_SERVICE_TOKEN:
+    raise ValueError(
+        "BACKEND_SERVICE_TOKEN не найден в .env. Сгенерируйте: "
+        "python3 -c \"import secrets; print(secrets.token_urlsafe(48))\""
+    )
 
 
 class OrderStates(StatesGroup):
@@ -65,6 +70,44 @@ class OrderStates(StatesGroup):
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+
+
+class ThrottlingMiddleware(BaseMiddleware):
+    """Простой антифлуд: не чаще одного действия в THROTTLE_SECONDS на юзера.
+
+    Без него один пользователь мог держать бэкенд и Fragment-запросы
+    непрерывными нажатиями кнопок.
+    """
+
+    def __init__(self, rate_limit: float = 0.4) -> None:
+        self.rate_limit = rate_limit
+        self._last_seen: dict[int, float] = {}
+
+    async def __call__(self, handler, event, data):
+        user = data.get("event_from_user")
+        if user is not None:
+            now = time.monotonic()
+            last = self._last_seen.get(user.id, 0.0)
+            if now - last < self.rate_limit:
+                if isinstance(event, CallbackQuery):
+                    await event.answer("Слишком быстро, подождите секунду.", show_alert=False)
+                return None
+            self._last_seen[user.id] = now
+            # Периодическая чистка, чтобы словарь не рос бесконечно.
+            if len(self._last_seen) > 10000:
+                cutoff = now - 60
+                self._last_seen = {k: v for k, v in self._last_seen.items() if v > cutoff}
+        return await handler(event, data)
+
+
+THROTTLE_SECONDS = float(os.getenv("THROTTLE_SECONDS", "0.4").strip() or 0.4)
+dp.message.middleware(ThrottlingMiddleware(THROTTLE_SECONDS))
+dp.callback_query.middleware(ThrottlingMiddleware(THROTTLE_SECONDS))
+
+# Админ-роутер подключается первым: он ловит только свои команды, callback-и
+# с известными префиксами и собственные FSM-состояния, поэтому обычные
+# клиентские сценарии для админа продолжают работать.
+dp.include_router(admin_panel.router)
 
 
 LEVELS_TEXT = (
@@ -108,7 +151,14 @@ SETTINGS_CACHE_TTL_SECONDS = 30
 SETTINGS_CACHE_EXPIRES_AT = 0.0
 TONVIEWER_STATS_CACHE_TTL_SECONDS = 600
 TONVIEWER_REQUEST_TIMEOUT_SECONDS = 15
-_tonviewer_stats_cache: dict[str, Any] = {"expires_at": 0.0, "stars": None}
+TONVIEWER_MAX_PAGES = int(os.getenv("TONVIEWER_MAX_PAGES", "50").strip() or 50)
+# total/top_lt позволяют дочитывать только новые события вместо полного прохода.
+_tonviewer_stats_cache: dict[str, Any] = {
+    "expires_at": 0.0,
+    "stars": None,
+    "total": 0,
+    "top_lt": "",
+}
 SALE_ACCESS_PLANS = {
     "sale_3d": {"title": "3 дня", "days": 3, "price": 79},
     "sale_7d": {"title": "7 дней", "days": 7, "price": 149},
@@ -384,15 +434,8 @@ def parse_backend_error(data: Any) -> str:
 
 
 def user_mention_or_id(user: dict | None) -> str:
-    if not user:
-        return "—"
-    username = (user.get("telegram_username") or "").strip()
-    if username:
-        return f"@{username}"
-    full_name = (user.get("telegram_full_name") or "").strip()
-    if full_name:
-        return full_name
-    return f"ID {user.get('telegram_user_id', '—')}"
+    """Экранированное упоминание пользователя (см. common.username_text)."""
+    return username_text(user)
 
 
 
@@ -576,8 +619,8 @@ async def send_welcome_message(message: Message, text: str) -> Message:
 
 async def http_request(method: str, url: str, json_body: dict[str, Any] | None = None) -> tuple[int, Any]:
     headers: dict[str, str] = {}
-    if url.startswith(BACKEND_URL) and BACKEND_ADMIN_TOKEN:
-        headers["X-Backend-Token"] = BACKEND_ADMIN_TOKEN
+    if url.startswith(BACKEND_URL) and BACKEND_SERVICE_TOKEN:
+        headers["X-Backend-Token"] = BACKEND_SERVICE_TOKEN
     session = await get_http_session()
     async with session.request(method, url, json=json_body, headers=headers) as response:
         text = await response.text()
@@ -594,22 +637,38 @@ async def refresh_settings(force: bool = False) -> dict[str, str]:
     if not force and now < SETTINGS_CACHE_EXPIRES_AT:
         return SETTINGS
 
-    status_code, result = await http_request("GET", f"{BACKEND_URL}/admin/settings")
-    if status_code < 400 and isinstance(result, dict) and isinstance(result.get("settings"), dict):
-        SETTINGS.update({str(key): str(value) for key, value in result["settings"].items()})
+    # Публичный срез настроек: админский токен для показа цен больше не нужен.
+    status_code, result = await http_request("GET", f"{BACKEND_URL}/settings/prices")
+    if status_code < 400 and isinstance(result, dict) and isinstance(result.get("prices"), dict):
+        SETTINGS.update({str(key): str(value) for key, value in result["prices"].items()})
         SETTINGS_CACHE_EXPIRES_AT = now + SETTINGS_CACHE_TTL_SECONDS
     return SETTINGS
 
 
 def fetch_tonviewer_sold_stars_sync() -> int | None:
+    """Считает проданные звёзды по истории кошелька.
+
+    История растёт бесконечно, поэтому полный проход делается один раз, а
+    дальше добираются только новые события (до已 известного lt). Раньше каждый
+    промах кэша перечитывал всю историю аккаунта с самого начала.
+    """
     if not FRAGMENT_ACCOUNT_ADDRESS:
         return None
 
+    base_total = int(_tonviewer_stats_cache.get("total") or 0)
+    known_top_lt = str(_tonviewer_stats_cache.get("top_lt") or "")
+    newest_lt_seen: str | None = None
+
     total_stars = 0
     before_lt: str | None = None
+    pages = 0
 
     with requests.Session() as session:
         while True:
+            pages += 1
+            if pages > TONVIEWER_MAX_PAGES:
+                logging.warning("TonViewer: достигнут лимит страниц, статистика может быть неполной")
+                break
             url = f"https://tonapi.io/v2/accounts/{FRAGMENT_ACCOUNT_ADDRESS}/events?limit=100"
             if before_lt:
                 url += f"&before_lt={before_lt}"
@@ -650,7 +709,15 @@ def fetch_tonviewer_sold_stars_sync() -> int | None:
                 return None
 
             events = data.get("events") or []
+            reached_known = False
             for event in events:
+                event_lt = str(event.get("lt") or "")
+                if newest_lt_seen is None and event_lt:
+                    newest_lt_seen = event_lt
+                # Досюда уже считали в прошлый раз — дальше идти незачем.
+                if known_top_lt and event_lt and event_lt <= known_top_lt:
+                    reached_known = True
+                    break
                 for action in event.get("actions") or []:
                     transfer = action.get("TonTransfer") or {}
                     comment = str(transfer.get("comment") or "")
@@ -658,12 +725,19 @@ def fetch_tonviewer_sold_stars_sync() -> int | None:
                     if match:
                         total_stars += int(match.group(1))
 
+            if reached_known:
+                break
+
             before_lt = str(data.get("next_from") or "")
             if not events or not before_lt or len(events) < 100:
                 break
             time.sleep(0.4)
 
-    return total_stars if total_stars > 0 else None
+    grand_total = base_total + total_stars
+    if newest_lt_seen:
+        _tonviewer_stats_cache["top_lt"] = newest_lt_seen
+    _tonviewer_stats_cache["total"] = grand_total
+    return grand_total if grand_total > 0 else None
 
 
 async def get_tonviewer_sold_stars() -> int | None:
@@ -828,134 +902,111 @@ async def create_balance_topup_request(
     )
 
 
+async def send_admin_message(text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    """Уведомление админу через основной бот.
+
+    Отдельного админ-бота больше нет: панель встроена в этот же бот, поэтому
+    и уведомления, и кнопки под ними обрабатываются здесь.
+    """
+    await bot.send_message(
+        chat_id=int(ADMIN_CHAT_ID),
+        text=text,
+        reply_markup=reply_markup,
+        disable_web_page_preview=True,
+    )
+
+
 async def send_admin_notification(order_id: str, order_data: dict[str, Any], customer: Message | CallbackQuery) -> None:
     from_user = customer.from_user
-    client_username = f"@{from_user.username}" if from_user and from_user.username else "без username"
-
-    recipient_username = order_data.get("recipient_username", "—")
-    stars_amount = order_data.get("stars_amount") or order_data.get("stars_count") or order_data.get("stars") or 0
-    amount_rub = order_data.get("amount_rub") or order_data.get("amount") or "0.00"
+    client_username = f"@{esc(from_user.username)}" if from_user and from_user.username else "без username"
 
     text = (
         "🕊 <b>Новая заявка на проверку оплаты</b>\n\n"
-        f"🆔 <b>ID заказа:</b> <code>{order_id}</code>\n"
-        f"👤 <b>Клиент:</b> {from_user.full_name if from_user else '—'}\n"
+        f"🆔 <b>ID заказа:</b> <code>{esc(order_id)}</code>\n"
+        f"👤 <b>Клиент:</b> {esc(from_user.full_name) if from_user else '—'}\n"
         f"🔹 <b>Telegram ID:</b> <code>{from_user.id if from_user else 0}</code>\n"
         f"📎 <b>Username клиента:</b> {client_username}\n"
-        f"🎁 <b>Получатель:</b> <code>{recipient_username}</code>\n"
-        f"⭐ <b>Звёзд:</b> <code>{stars_amount}</code>\n"
-        f"💰 <b>Сумма:</b> <code>{money_text(amount_rub)}</code> RUB"
+        f"🎁 <b>Получатель:</b> <code>{esc(order_data.get('recipient_username', '—'))}</code>\n"
+        f"⭐ <b>Звёзд:</b> <code>{esc(order_data.get('stars_amount') or order_data.get('stars') or 0)}</code>\n"
+        f"💰 <b>Сумма:</b> "
+        f"<code>{money_text(order_data.get('amount_rub') or order_data.get('amount') or 0)}</code> RUB"
     )
-
-    payload = {
-        "chat_id": ADMIN_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "reply_markup": {
-            "inline_keyboard": [[
-                {"text": "✅ Подтвердить", "callback_data": f"admin:approve:{order_id}"},
-                {"text": "❌ Отклонить", "callback_data": f"admin:reject:{order_id}"},
-            ]]
-        },
-    }
-    status_code, result = await http_request("POST", f"https://api.telegram.org/bot{ADMIN_BOT_TOKEN}/sendMessage", payload)
-    if status_code >= 400:
-        raise RuntimeError(f"Не удалось отправить уведомление админу: {result}")
+    await send_admin_message(text, InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"admin:approve:{order_id}"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"admin:reject:{order_id}"),
+    ]]))
 
 
 async def send_withdraw_admin_notification(message: Message, withdrawal: dict, user: dict) -> None:
     username = message.from_user.username or user.get("telegram_username") or ""
-    display_username = f"@{username}" if username else "без username"
+    display_username = f"@{esc(username)}" if username else "без username"
 
     text = (
         "🏧 <b>Новая заявка на вывод</b>\n\n"
-        f"🆔 <b>ID заявки:</b> <code>{withdrawal['id']}</code>\n"
-        f"👤 <b>Пользователь:</b> {message.from_user.full_name}\n"
+        f"🆔 <b>ID заявки:</b> <code>{esc(withdrawal['id'])}</code>\n"
+        f"👤 <b>Пользователь:</b> {esc(message.from_user.full_name)}\n"
         f"🔹 <b>Telegram ID:</b> <code>{message.from_user.id}</code>\n"
         f"📎 <b>Username:</b> {display_username}\n"
         f"💸 <b>Сумма:</b> <code>{money_text(withdrawal['amount'])}</code> RUB\n"
-        f"💳 <b>Реквизиты:</b> <code>{withdrawal['requisites']}</code>\n"
+        f"💳 <b>Реквизиты:</b> <code>{esc(withdrawal['requisites'])}</code>\n"
         f"💼 <b>Осталось доступно:</b> <code>{money_text(user['ref_balance_available'])}</code> RUB\n"
         f"🔒 <b>Заморожено:</b> <code>{money_text(user['ref_balance_frozen'])}</code> RUB"
     )
-
-    payload = {
-        "chat_id": ADMIN_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "reply_markup": {
-            "inline_keyboard": [
-                [{"text": "✅ Отметить выплаченным", "callback_data": f"admin:withdraw:paid:{withdrawal['id']}"}],
-                [{"text": "❌ Отклонить", "callback_data": f"admin:withdraw:reject:{withdrawal['id']}"}],
-            ]
-        },
-    }
-    status_code, result = await http_request("POST", f"https://api.telegram.org/bot{ADMIN_BOT_TOKEN}/sendMessage", payload)
-    if status_code >= 400:
-        raise RuntimeError(f"Не удалось отправить уведомление о выводе: {result}")
+    await send_admin_message(text, InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отметить выплаченным",
+                              callback_data=f"admin:withdraw:paid:{withdrawal['id']}")],
+        [InlineKeyboardButton(text="❌ Отклонить",
+                              callback_data=f"admin:withdraw:reject:{withdrawal['id']}")],
+    ]))
 
 
 async def send_topup_admin_notification(message: Message, topup: dict) -> None:
     username = message.from_user.username or ""
-    display_username = f"@{username}" if username else "без username"
+    display_username = f"@{esc(username)}" if username else "без username"
     text = (
         "💳 <b>Новая заявка на пополнение баланса</b>\n\n"
-        f"🆔 <b>ID заявки:</b> <code>{topup['id']}</code>\n"
-        f"👤 <b>Пользователь:</b> {message.from_user.full_name}\n"
+        f"🆔 <b>ID заявки:</b> <code>{esc(topup['id'])}</code>\n"
+        f"👤 <b>Пользователь:</b> {esc(message.from_user.full_name)}\n"
         f"🔹 <b>Telegram ID:</b> <code>{message.from_user.id}</code>\n"
         f"📎 <b>Username:</b> {display_username}\n"
         f"💸 <b>Сумма:</b> <code>{money_text(topup['amount'])}</code> RUB"
     )
-    payload = {
-        "chat_id": ADMIN_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "reply_markup": {
-            "inline_keyboard": [
-                [{"text": "✅ Зачислить на баланс", "callback_data": f"admin:topup:approve:{topup['id']}"}],
-                [{"text": "❌ Отклонить", "callback_data": f"admin:topup:reject:{topup['id']}"}],
-            ]
-        },
-    }
-    status_code, result = await http_request("POST", f"https://api.telegram.org/bot{ADMIN_BOT_TOKEN}/sendMessage", payload)
-    if status_code >= 400:
-        raise RuntimeError(f"Не удалось отправить уведомление о пополнении: {result}")
+    await send_admin_message(text, InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Зачислить на баланс",
+                              callback_data=f"admin:topup:approve:{topup['id']}")],
+        [InlineKeyboardButton(text="❌ Отклонить",
+                              callback_data=f"admin:topup:reject:{topup['id']}")],
+    ]))
 
 
 async def send_sale_access_admin_notification(request_id: str, request_data: dict[str, Any], customer: Message | CallbackQuery) -> None:
     from_user = customer.from_user
-    client_username = f"@{from_user.username}" if from_user and from_user.username else "без username"
+    client_username = f"@{esc(from_user.username)}" if from_user and from_user.username else "без username"
 
     text = (
         "💸 <b>Новая заявка на продажу звёзд</b>\n\n"
-        f"🆔 <b>ID заявки:</b> <code>{request_id}</code>\n"
-        f"👤 <b>Клиент:</b> {from_user.full_name if from_user else '—'}\n"
+        f"🆔 <b>ID заявки:</b> <code>{esc(request_id)}</code>\n"
+        f"👤 <b>Клиент:</b> {esc(from_user.full_name) if from_user else '—'}\n"
         f"🔹 <b>Telegram ID:</b> <code>{from_user.id if from_user else 0}</code>\n"
         f"📎 <b>Username клиента:</b> {client_username}\n"
-        f"📦 <b>Тариф:</b> <code>{request_data.get('plan_title', '—')}</code>\n"
-        f"🗓 <b>Срок:</b> <code>{request_data.get('days', 0)}</code> дн.\n"
+        f"📦 <b>Тариф:</b> <code>{esc(request_data.get('plan_title', '—'))}</code>\n"
+        f"🗓 <b>Срок:</b> <code>{esc(request_data.get('days', 0))}</code> дн.\n"
         f"💰 <b>Сумма:</b> <code>{money_text(request_data.get('amount', 0))}</code> RUB\n"
-        f"⭐ <b>Цена выкупа:</b> <code>{money_text(request_data.get('price_per_star', sale_price_per_star()))}</code> ₽/шт"
+        f"⭐ <b>Цена выкупа:</b> "
+        f"<code>{money_text(request_data.get('price_per_star', sale_price_per_star()))}</code> ₽/шт"
     )
-
-    payload = {
-        "chat_id": ADMIN_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "reply_markup": {
-            "inline_keyboard": [
-                [{"text": "✅ Активировать", "callback_data": f"admin:sale:approve:{request_id}"}],
-                [{"text": "❌ Отклонить", "callback_data": f"admin:sale:reject:{request_id}"}],
-            ]
-        },
-    }
-    status_code, result = await http_request("POST", f"https://api.telegram.org/bot{ADMIN_BOT_TOKEN}/sendMessage", payload)
-    if status_code >= 400:
-        raise RuntimeError(f"Не удалось отправить уведомление о продаже звёзд: {result}")
+    await send_admin_message(text, InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Активировать", callback_data=f"admin:sale:approve:{request_id}")],
+        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"admin:sale:reject:{request_id}")],
+    ]))
 
 
 async def send_admin_new_referral_notification(new_user: Message, inviter: dict, invite_count: int) -> None:
-    new_username = f"@{new_user.from_user.username}" if new_user.from_user and new_user.from_user.username else new_user.from_user.full_name
+    new_username = (
+        f"@{esc(new_user.from_user.username)}"
+        if new_user.from_user and new_user.from_user.username
+        else esc(new_user.from_user.full_name)
+    )
     text = (
         "🎉<b>Новый пользователь!</b>\n\n"
         f"🤝 <b>Партнёр:</b> {user_mention_or_id(inviter)}\n"
@@ -963,8 +1014,7 @@ async def send_admin_new_referral_notification(new_user: Message, inviter: dict,
         f"🔹 <b>ID нового пользователя:</b> <code>{new_user.from_user.id}</code>\n"
         f"👥 <b>Всего приглашено у партнёра:</b> <code>{invite_count}</code>"
     )
-    payload = {"chat_id": ADMIN_CHAT_ID, "text": text, "parse_mode": "HTML"}
-    await http_request("POST", f"https://api.telegram.org/bot{ADMIN_BOT_TOKEN}/sendMessage", payload)
+    await send_admin_message(text)
 
 
 async def send_partner_new_referral_notification(inviter: dict, new_user: Message, invite_count: int) -> None:
@@ -976,11 +1026,15 @@ async def send_partner_new_referral_notification(inviter: dict, new_user: Messag
         + Decimal(str(profile_user.get("ref_balance_frozen", 0)))
         + Decimal(str(profile_user.get("ref_total_paid", 0)))
     )
-    new_username = f"@{new_user.from_user.username}" if new_user.from_user and new_user.from_user.username else new_user.from_user.full_name
+    new_username = (
+        f"@{esc(new_user.from_user.username)}"
+        if new_user.from_user and new_user.from_user.username
+        else esc(new_user.from_user.full_name)
+    )
     text = (
         "🎉  <b>У вас новый реферал!</b>\n\n"
-        f"🤝 <b>Реферал:</b>{new_username}\n"
-        f"🆕 <b>Новый пользователь:</b>{new_user.from_user.full_name}\n"
+        f"🤝 <b>Реферал:</b> {new_username}\n"
+        f"🆕 <b>Новый пользователь:</b> {esc(new_user.from_user.full_name)}\n"
         f"😎 <b>Всего пригласил:</b> <code>{invite_count}</code>\n"
         f"💸 <b>Ваш оборот:</b> <code>{money_text(profile_user.get('ref_total_turnover', 0))}</code> ₽\n"
         f"💰 <b>Общий заработок:</b> <code>{money_text(total_earned)}</code> ₽"
@@ -1053,7 +1107,7 @@ async def render_referral_profile_message(target: Message | CallbackQuery) -> No
     inviter_text = "не назначен"
     inviter_username = inviter.get("telegram_username") or ""
     if inviter:
-        inviter_text = f"@{inviter_username}" if inviter_username else f"ID {inviter.get('telegram_user_id')}"
+        inviter_text = f"@{esc(inviter_username)}" if inviter_username else f"ID {esc(inviter.get('telegram_user_id'))}"
 
     recent_lines = []
     for item in (profile.get("recent_transactions") or [])[:3]:
@@ -1315,7 +1369,7 @@ async def create_and_send_order_message(
     text = (
         "✅ <b>Заказ сформирован</b>\n"
         f"🆔 <b>ID заказа:</b> <code>{order_id}</code>\n"
-        f"🎁 <b>Получатель:</b> <code>{recipient_username}</code>\n"
+        f"🎁 <b>Получатель:</b> <code>{esc(recipient_username)}</code>\n"
         f"⭐ <b>Звёзды:</b> <code>{stars}</code>\n"
         f"💰 <b>К оплате:</b> <code>{money_text(total)}</code> RUB\n\n"
         "💳 <b>Реквизиты</b>\n"
@@ -1332,7 +1386,7 @@ async def create_and_send_order_message(
     await target_message.answer(
         "✅ <b>Заказ сформирован</b>\n\n"
         f"🆔 <b>ID заказа:</b> <code>{order_id}</code>\n"
-        f"🎁 <b>Получатель:</b> <code>{recipient_username}</code>\n"
+        f"🎁 <b>Получатель:</b> <code>{esc(recipient_username)}</code>\n"
         f"⭐ <b>Количество звёзд:</b> <code>{stars}</code>\n"
         f"💰 <b>Сумма к оплате:</b> <code>{money_text(total)}</code> RUB\n\n"
         "💳 <b>Оплата на карту</b>\n"
@@ -1378,7 +1432,7 @@ async def create_and_send_balance_order_message(
         "✅ <b>Покупка с баланса выполнена</b>\n"
         "Заказ уже передан в автоматическую выдачу.\n\n"
         f"🆔 <b>ID заказа:</b> <code>{order.get('id', '—')}</code>\n"
-        f"🎁 <b>Получатель:</b> <code>{recipient_username}</code>\n"
+        f"🎁 <b>Получатель:</b> <code>{esc(recipient_username)}</code>\n"
         f"⭐ <b>Звёзды:</b> <code>{stars}</code>\n"
         f"💸 <b>Списано:</b> <code>{money_text(total)}</code> RUB\n"
         f"💰 <b>Остаток:</b> <code>{money_text(profile_user.get('balance', 0))}</code> RUB"
@@ -1413,7 +1467,7 @@ async def show_payment_options_message(
     text = (
         "✅ <b>Заказ сформирован</b>\n\n"
         "📋 <b>Данные заказа</b>\n"
-        f"🎁 <b>Получатель:</b> <code>{recipient_username}</code>\n"
+        f"🎁 <b>Получатель:</b> <code>{esc(recipient_username)}</code>\n"
         f"⭐ <b>Звёзды:</b> <code>{stars}</code>\n"
         f"💎 <b>Цена:</b> <code>{calc_price_per_star(stars)}</code> ₽ за 1 ⭐\n"
         f"💰 <b>Итого:</b> <code>{money_text(total)}</code> RUB\n"
@@ -1509,7 +1563,7 @@ async def start_handler(message: Message, state: FSMContext) -> None:
     if inviter_code:
         if inviter:
             inviter_username = inviter.get("telegram_username") or ""
-            inviter_name = f"@{inviter_username}" if inviter_username else f"ID {inviter.get('telegram_user_id')}"
+            inviter_name = f"@{esc(inviter_username)}" if inviter_username else f"ID {esc(inviter.get('telegram_user_id'))}"
             text += f"\n\n🤝 Вы зашли по реферальной ссылке партнёра {inviter_name}."
         else:
             text += "\n\n⚠️ Реферальный код не удалось применить."
@@ -2228,12 +2282,24 @@ async def fallback_handler(message: Message) -> None:
 
 
 async def main() -> None:
+    logging.info(
+        "Запуск AraStars бота. Админ-панель доступна пользователю %s по команде /admin",
+        admin_panel.ADMIN_USER_ID,
+    )
+    if not admin_panel.BACKEND_ADMIN_TOKEN:
+        logging.warning(
+            "BACKEND_ADMIN_TOKEN не задан — админ-панель не сможет подтверждать заказы."
+        )
     await bot.delete_webhook(drop_pending_updates=True)
     try:
         await dp.start_polling(bot)
     finally:
         await close_http_session()
+        await bot.session.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Остановлено пользователем")

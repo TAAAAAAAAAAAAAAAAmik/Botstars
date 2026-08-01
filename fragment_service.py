@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from typing import Any
 
@@ -17,6 +18,24 @@ from tonsdk.utils import Address
 load_dotenv(dotenv_path=".env")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+NANO = 1_000_000_000
+
+
+class FragmentError(RuntimeError):
+    """Ошибка до отправки средств. Повторять покупку безопасно."""
+
+
+class FragmentFundsSentError(RuntimeError):
+    """Средства уже ушли в сеть, но заказ не завершён.
+
+    Повторять покупку НЕЛЬЗЯ — будет двойная трата. Заказ обязан уйти
+    на ручной разбор.
+    """
+
+    def __init__(self, message: str, sent_messages: list[dict[str, Any]] | None = None) -> None:
+        super().__init__(message)
+        self.sent_messages = sent_messages or []
 
 FRAGMENT_API_URL = os.getenv("FRAGMENT_API_URL", "https://fragment.com/api").strip()
 FRAGMENT_STARS_BUY_URL = os.getenv("FRAGMENT_STARS_BUY_URL", "https://fragment.com/stars/buy").strip()
@@ -33,6 +52,22 @@ FRAGMENT_WALLET_VERSION = os.getenv("FRAGMENT_WALLET_VERSION", "v4r2").strip().l
 TONCENTER_SEND_BOC_URL = os.getenv("TONCENTER_SEND_BOC_URL", "https://toncenter.com/api/v2/sendBoc").strip()
 TONCENTER_RUNGET_URL = os.getenv("TONCENTER_RUNGET_URL", "https://toncenter.com/api/v2/runGetMethod").strip()
 TONCENTER_API_KEY = os.getenv("TONCENTER_API_KEY", "").strip()
+
+# Защита горячего кошелька: Fragment сам присылает сумму перевода, и без
+# верхней границы протухшая сессия или подменённый ответ уводят весь баланс.
+FRAGMENT_MAX_TON_PER_MESSAGE = float(os.getenv("FRAGMENT_MAX_TON_PER_MESSAGE", "50").strip() or 50)
+FRAGMENT_MAX_TON_PER_ORDER = float(os.getenv("FRAGMENT_MAX_TON_PER_ORDER", "100").strip() or 100)
+# Сколько TON максимум допустимо за 1000 звёзд. Ориентир: ~1000 звёзд ≈ 2-3 TON,
+# берём запас x3, чтобы скачок курса не блокировал выдачу.
+FRAGMENT_MAX_TON_PER_1000_STARS = float(os.getenv("FRAGMENT_MAX_TON_PER_1000_STARS", "9").strip() or 9)
+FRAGMENT_MAX_MESSAGES_PER_ORDER = int(os.getenv("FRAGMENT_MAX_MESSAGES_PER_ORDER", "4").strip() or 4)
+# Ожидание подтверждения перевода в сети (рост seqno кошелька).
+FRAGMENT_SEQNO_CONFIRM_TIMEOUT = int(os.getenv("FRAGMENT_SEQNO_CONFIRM_TIMEOUT", "90").strip() or 90)
+FRAGMENT_SEQNO_POLL_INTERVAL = float(os.getenv("FRAGMENT_SEQNO_POLL_INTERVAL", "3").strip() or 3)
+
+# Кошелёк один, seqno — общий счётчик. Две параллельные покупки прочитают
+# одинаковый seqno, и один перевод молча потеряется. Лок обязателен.
+_WALLET_LOCK = threading.Lock()
 
 _fragment_hash_cache: dict[str, Any] = {
     "value": FRAGMENT_HASH,
@@ -301,6 +336,79 @@ def get_wallet_raw_address() -> str:
     )
 
 
+def validate_transfer_amounts(messages: list[dict[str, Any]], quantity: int) -> int:
+    """Проверяет суммы, которые прислал Fragment, до отправки в блокчейн.
+
+    Возвращает суммарную сумму в нанотонах. Бросает FragmentError, если
+    что-то выходит за разумные пределы — лучше сорвать выдачу, чем отдать
+    кошелёк.
+    """
+    if not messages:
+        raise FragmentError("Fragment не вернул ни одного сообщения для перевода")
+    if len(messages) > FRAGMENT_MAX_MESSAGES_PER_ORDER:
+        raise FragmentError(
+            f"Fragment вернул {len(messages)} сообщений, допустимо не больше "
+            f"{FRAGMENT_MAX_MESSAGES_PER_ORDER}"
+        )
+
+    total_nano = 0
+    for index, msg in enumerate(messages):
+        raw_address = str(msg.get("address") or "").strip()
+        if not raw_address:
+            raise FragmentError(f"Сообщение #{index} без адреса получателя")
+        try:
+            Address(raw_address)
+        except Exception as exc:
+            raise FragmentError(f"Некорректный адрес получателя в сообщении #{index}: {raw_address}") from exc
+
+        try:
+            amount_nano = int(msg.get("amount"))
+        except (TypeError, ValueError) as exc:
+            raise FragmentError(f"Некорректная сумма в сообщении #{index}: {msg.get('amount')!r}") from exc
+
+        if amount_nano <= 0:
+            raise FragmentError(f"Неположительная сумма в сообщении #{index}: {amount_nano}")
+        if amount_nano > FRAGMENT_MAX_TON_PER_MESSAGE * NANO:
+            raise FragmentError(
+                f"Сумма перевода #{index} = {amount_nano / NANO:.4f} TON превышает лимит "
+                f"{FRAGMENT_MAX_TON_PER_MESSAGE} TON на сообщение"
+            )
+        total_nano += amount_nano
+
+    if total_nano > FRAGMENT_MAX_TON_PER_ORDER * NANO:
+        raise FragmentError(
+            f"Суммарный перевод {total_nano / NANO:.4f} TON превышает лимит "
+            f"{FRAGMENT_MAX_TON_PER_ORDER} TON на заказ"
+        )
+
+    expected_cap_nano = (max(quantity, 1) / 1000.0) * FRAGMENT_MAX_TON_PER_1000_STARS * NANO
+    if total_nano > expected_cap_nano:
+        raise FragmentError(
+            f"Fragment просит {total_nano / NANO:.4f} TON за {quantity} звёзд — это выше "
+            f"потолка {expected_cap_nano / NANO:.4f} TON. Покупка остановлена."
+        )
+
+    return total_nano
+
+
+def wait_for_seqno(wallet_address: str, expected_seqno: int) -> bool:
+    """Ждёт, пока seqno кошелька дорастёт до expected_seqno.
+
+    sendBoc возвращает ok сразу после приёма сообщения сетью — это не значит,
+    что перевод исполнен. Без этой проверки заказ помечается выданным,
+    когда звёзды могли не уйти.
+    """
+    deadline = time.time() + FRAGMENT_SEQNO_CONFIRM_TIMEOUT
+    while time.time() < deadline:
+        time.sleep(FRAGMENT_SEQNO_POLL_INTERVAL)
+        try:
+            if get_seqno(wallet_address) >= expected_seqno:
+                return True
+        except Exception as exc:
+            logger.warning("Не удалось прочитать seqno при подтверждении: %s", exc)
+    return False
+
+
 def get_seqno(wallet_address: str) -> int:
     payload = {
         "address": wallet_address,
@@ -384,6 +492,17 @@ def normalize_recipient(username: str) -> str:
 
 
 def auto_buy_stars(username: str, quantity: int) -> dict[str, Any]:
+    """Покупает звёзды на Fragment с горячего TON-кошелька.
+
+    Кошелёк один на весь сервис, поэтому вся операция выполняется под локом:
+    иначе две параллельные покупки возьмут одинаковый seqno и один перевод
+    потеряется. После каждой отправки ждём подтверждения в сети.
+    """
+    with _WALLET_LOCK:
+        return _auto_buy_stars_locked(username, quantity)
+
+
+def _auto_buy_stars_locked(username: str, quantity: int) -> dict[str, Any]:
     ensure_fragment_runtime_config()
     if quantity < 50:
         raise ValueError("Минимальный заказ — 50 звёзд")
@@ -429,28 +548,47 @@ def auto_buy_stars(username: str, quantity: int) -> dict[str, Any]:
 
         tx = link_result.get("transaction") or {}
         messages = tx.get("messages") or []
-        if not messages:
-            raise RuntimeError(f"В transaction нет messages: {link_result}")
+
+        # Ключевая проверка: суммы приходят от Fragment и до этого момента
+        # уходили в блокчейн без единой проверки.
+        total_nano = validate_transfer_amounts(messages, quantity)
+        logger.info(
+            "Fragment запросил %.4f TON за %s звёзд (%s сообщений) — в пределах лимитов",
+            total_nano / NANO,
+            quantity,
+            len(messages),
+        )
 
         wallet_address = get_wallet_raw_address()
-        current_seqno = get_seqno(wallet_address)
+        start_seqno = get_seqno(wallet_address)
 
-        sent_messages = []
+        sent_messages: list[dict[str, Any]] = []
         last_boc = None
 
         for index, msg in enumerate(messages):
             recipient_addr = msg["address"]
-            amount_nano = msg["amount"]
+            amount_nano = int(msg["amount"])
             payload_b64 = msg.get("payload", "")
+            seqno = start_seqno + index
 
             boc_b64 = build_boc_with_comment(
                 recipient=recipient_addr,
                 amount_nano=amount_nano,
                 payload_b64=payload_b64,
-                seqno=current_seqno + index,
+                seqno=seqno,
             )
 
-            toncenter_result = send_boc_to_toncenter(boc_b64)
+            try:
+                toncenter_result = send_boc_to_toncenter(boc_b64)
+            except Exception as exc:
+                if sent_messages:
+                    # Часть переводов уже ушла — повторять заказ нельзя.
+                    raise FragmentFundsSentError(
+                        f"Перевод #{index} не отправлен ({exc}), но {len(sent_messages)} "
+                        "предыдущих уже ушли в сеть. Требуется ручная проверка.",
+                        sent_messages,
+                    ) from exc
+                raise FragmentError(f"Не удалось отправить перевод: {exc}") from exc
 
             sent_messages.append(
                 {
@@ -460,16 +598,36 @@ def auto_buy_stars(username: str, quantity: int) -> dict[str, Any]:
                     "toncenter_result": toncenter_result,
                 }
             )
-
             last_boc = boc_b64
 
-        if not last_boc:
-            raise RuntimeError("Не удалось собрать BOC для confirmReq")
+            # Следующее сообщение требует, чтобы предыдущее уже закоммитилось,
+            # иначе его seqno окажется невалидным и перевод отбракуют.
+            if not wait_for_seqno(wallet_address, seqno + 1):
+                raise FragmentFundsSentError(
+                    f"Перевод #{index} отправлен, но сеть не подтвердила его за "
+                    f"{FRAGMENT_SEQNO_CONFIRM_TIMEOUT} c. Требуется ручная проверка.",
+                    sent_messages,
+                )
 
-        confirm_result = confirm_req(session, str(req_id), last_boc)
+        if not last_boc:
+            raise FragmentError("Не удалось собрать BOC для confirmReq")
+
+        try:
+            confirm_result = confirm_req(session, str(req_id), last_boc)
+        except Exception as exc:
+            raise FragmentFundsSentError(
+                f"Переводы отправлены и подтверждены, но confirmReq упал: {exc}. "
+                "Повторять покупку нельзя — нужна ручная проверка.",
+                sent_messages,
+            ) from exc
+
         logger.info("confirmReq => %s", confirm_result)
         if confirm_result.get("ok") is False:
-            raise RuntimeError(f"confirmReq returned not ok: {confirm_result}")
+            raise FragmentFundsSentError(
+                f"Переводы отправлены, но confirmReq вернул ошибку: {confirm_result}. "
+                "Повторять покупку нельзя — нужна ручная проверка.",
+                sent_messages,
+            )
 
         return {
             "ok": True,
@@ -477,6 +635,7 @@ def auto_buy_stars(username: str, quantity: int) -> dict[str, Any]:
             "quantity": quantity,
             "req_id": req_id,
             "recipient": recipient,
+            "total_ton": round(total_nano / NANO, 6),
             "search_result": search_result,
             "init_result": init_result,
             "link_result": link_result,
