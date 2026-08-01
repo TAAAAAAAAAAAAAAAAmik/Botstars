@@ -532,3 +532,89 @@ def test_full_json_still_works(client, env_sandbox):
     )
     assert response.status_code == 200
     assert _cookies(client, env_sandbox) == {"stel_ssid": "x", "stel_token": "y"}
+
+
+# ---------------------------------------------------------------------------
+# Авторизация Ozon
+# ---------------------------------------------------------------------------
+
+
+class _FakeDriver:
+    """Драйвер, отдающий заданное состояние страницы Ozon."""
+
+    def __init__(self, state: dict) -> None:
+        self.state = state
+        self.current_url = "https://finance.ozon.ru/lk/operations"
+
+    def execute_script(self, script, *args):
+        return self.state
+
+
+@pytest.mark.parametrize(
+    "page,expected",
+    [
+        ({"hasPhone": True, "hasSms": False, "hasPin": False, "hasOperations": False}, "needs_phone"),
+        ({"hasPhone": False, "hasSms": True, "hasPin": False, "hasOperations": False}, "needs_sms"),
+        ({"hasPhone": False, "hasSms": False, "hasPin": True, "hasOperations": False}, "needs_pin"),
+        ({"hasPhone": False, "hasSms": False, "hasPin": False, "hasOperations": True}, "authorized"),
+        ({"hasPhone": False, "hasSms": False, "hasPin": False, "hasOperations": False}, "unknown"),
+    ],
+)
+def test_detect_ozon_auth_state(client, page, expected):
+    assert client.main.detect_ozon_auth_state(_FakeDriver(page)) == expected
+
+
+def test_phone_form_wins_over_other_states(client):
+    """Форма телефона важнее: код-пароль тут уже не поможет."""
+    page = {"hasPhone": True, "hasSms": True, "hasPin": True, "hasOperations": True}
+    assert client.main.detect_ozon_auth_state(_FakeDriver(page)) == "needs_phone"
+
+
+def test_auth_state_unknown_when_script_fails(client):
+    class Broken:
+        def execute_script(self, *a, **kw):
+            raise RuntimeError("no browser")
+
+    assert client.main.detect_ozon_auth_state(Broken()) == "unknown"
+
+
+@pytest.mark.parametrize(
+    "error,needs_reauth",
+    [
+        ("NO_BANK_AUTH", True),
+        ("Ozon operations failed: 401 unauthorized", True),
+        ("needs_phone", True),
+        ("Connection timed out", False),
+        ("chromedriver crashed", False),
+    ],
+)
+def test_ozon_error_classification(client, error, needs_reauth):
+    """Сетевой сбой не должен будить владельца, протухшая сессия — должна."""
+    assert client.main.ozon_error_needs_reauth(error) is needs_reauth
+
+
+def test_login_endpoints_require_admin_token(client):
+    for path, body in (
+        ("/admin/ozon/login/start", {"phone": "79001234567"}),
+        ("/admin/ozon/login/code", {"code": "1234"}),
+        ("/admin/ozon/auth-state", None),
+    ):
+        anon = client.post(path, json=body) if body else client.get(path)
+        assert anon.status_code == 401, f"{path} доступен без токена"
+
+        service = (
+            client.post(path, json=body, headers={"X-Backend-Token": SERVICE_TOKEN})
+            if body
+            else client.get(path, headers={"X-Backend-Token": SERVICE_TOKEN})
+        )
+        assert service.status_code == 403, f"{path} принял сервисный токен"
+
+
+def test_login_rejects_bad_phone(client, monkeypatch):
+    """Некорректный телефон отсекается до запуска браузера."""
+    main_module = client.main
+    monkeypatch.setattr(main_module, "get_ozon_selenium_driver", lambda **kw: _FakeDriver({}))
+
+    for bad_phone in ("12345", "не телефон", "7900123456789"):
+        with pytest.raises(Exception):
+            main_module.ozon_login_start(bad_phone)

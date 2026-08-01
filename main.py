@@ -119,6 +119,12 @@ OZON_HEALTH: dict[str, object] = {
     "keepalive_interval_seconds": OZON_COOKIE_KEEPALIVE_INTERVAL_SECONDS,
 }
 OZON_LAST_FETCH_DEBUG: dict[str, object] = {}
+# Состояние авторизации Ozon. notified_at гасит повтор уведомлений: watcher
+# ходит каждые 15 с, и без этого владелец получил бы 240 сообщений в час.
+OZON_AUTH_STATE: dict[str, object] = {"state": "unknown", "checked_at": None, "notified_at": None}
+OZON_REAUTH_NOTIFY_INTERVAL_SECONDS = int(
+    os.getenv("OZON_REAUTH_NOTIFY_INTERVAL_SECONDS", "3600").strip() or 3600
+)
 
 SALE_PRICE_PER_STAR = 1.2
 SALE_ACCESS_PLANS: dict[str, dict[str, int | float | str]] = {
@@ -3085,6 +3091,185 @@ def summarize_ozon_response(data: object, text: str) -> dict[str, object]:
     return summary
 
 
+def detect_ozon_auth_state(driver) -> str:
+    """Определяет, на каком этапе авторизации находится страница Ozon.
+
+    Сессия умирает в два шага: сначала спрашивают код-пароль (его бот вводит
+    сам), потом — телефон и SMS. Второй шаг без человека не пройти, поэтому
+    важно отличать эти состояния и вовремя позвать владельца.
+
+    Возвращает: authorized | needs_pin | needs_sms | needs_phone | unknown
+    """
+    try:
+        state = driver.execute_script(
+            """
+            const text = document.body ? document.body.innerText : '';
+            const q = (sel) => !!document.querySelector(sel);
+            return {
+                url: location.href,
+                hasPhone: q('[data-testid="phone-form"]') || q('input[name="phone"]')
+                          || q('input[type="tel"]') || text.includes('Введите номер телефона'),
+                hasSms: q('[data-testid="sms-code"]') || q('[data-testid="otp-input"]')
+                        || text.includes('код из SMS') || text.includes('Код из SMS')
+                        || text.includes('отправили код'),
+                hasPin: q('[data-testid="pincode-input"]') || q('[data-testid="code-wrapper"]')
+                        || text.includes('код-пароль'),
+                hasOperations: q('[data-testid="operations"]') || location.href.includes('/lk/operations')
+            };
+            """
+        )
+    except Exception:
+        return "unknown"
+
+    if not isinstance(state, dict):
+        return "unknown"
+
+    # Порядок важен: форма телефона перекрывает всё остальное.
+    if state.get("hasPhone"):
+        return "needs_phone"
+    if state.get("hasSms"):
+        return "needs_sms"
+    if state.get("hasPin"):
+        return "needs_pin"
+    if state.get("hasOperations"):
+        return "authorized"
+    return "unknown"
+
+
+def _fill_ozon_field(driver, selectors: tuple[str, ...], value: str) -> bool:
+    """Ищет первое подходящее поле и вводит значение."""
+    try:
+        from selenium.webdriver.common.by import By
+    except ImportError:
+        return False
+
+    for selector in selectors:
+        try:
+            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+        except Exception:
+            continue
+        for element in elements:
+            try:
+                if not element.is_displayed() or not element.is_enabled():
+                    continue
+                element.click()
+                try:
+                    element.clear()
+                except Exception:
+                    pass
+                element.send_keys(value)
+                return True
+            except Exception:
+                continue
+    return False
+
+
+def _submit_ozon_form(driver) -> None:
+    """Нажимает кнопку отправки или жмёт Enter."""
+    try:
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
+    except ImportError:
+        return
+
+    for selector in ('button[type="submit"]', '[data-testid="submit"]', "button"):
+        try:
+            for element in driver.find_elements(By.CSS_SELECTOR, selector):
+                if element.is_displayed() and element.is_enabled():
+                    element.click()
+                    return
+        except Exception:
+            continue
+
+    try:
+        driver.switch_to.active_element.send_keys(Keys.ENTER)
+    except Exception:
+        pass
+
+
+def ozon_login_start(phone: str) -> dict[str, object]:
+    """Открывает форму входа и запрашивает SMS-код на указанный телефон."""
+    driver = get_ozon_selenium_driver(reset=True)
+    driver.get("https://finance.ozon.ru/")
+    time.sleep(3)
+
+    state = detect_ozon_auth_state(driver)
+    if state == "authorized":
+        return {"state": "authorized", "message": "Сессия ещё жива, повторный вход не нужен"}
+
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    if len(digits) != 11:
+        raise HTTPException(status_code=400, detail="Телефон должен содержать 11 цифр, например 79001234567")
+
+    filled = _fill_ozon_field(
+        driver,
+        ('[data-testid="phone-form"] input', 'input[name="phone"]', 'input[type="tel"]', 'input[inputmode="tel"]'),
+        digits,
+    )
+    if not filled:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Не найдено поле ввода телефона на странице Ozon (состояние: {state})",
+        )
+
+    _submit_ozon_form(driver)
+    time.sleep(5)
+
+    new_state = detect_ozon_auth_state(driver)
+    OZON_AUTH_STATE.update({"state": new_state, "checked_at": now_iso()})
+    return {
+        "state": new_state,
+        "page_url": driver.current_url,
+        "message": "Код отправлен, введите его" if new_state == "needs_sms" else f"Состояние: {new_state}",
+    }
+
+
+def ozon_login_submit_code(code: str) -> dict[str, object]:
+    """Вводит код из SMS, затем код-пароль, и проверяет, что вошли."""
+    code = re.sub(r"\D", "", code)
+    if not code:
+        raise HTTPException(status_code=400, detail="Код должен состоять из цифр")
+
+    driver = get_ozon_selenium_driver()
+    filled = _fill_ozon_field(
+        driver,
+        (
+            '[data-testid="sms-code"] input',
+            '[data-testid="otp-input"] input',
+            'input[inputmode="numeric"]',
+            'input[autocomplete="one-time-code"]',
+        ),
+        code,
+    )
+    if not filled:
+        raise HTTPException(status_code=502, detail="Не найдено поле ввода кода из SMS")
+
+    _submit_ozon_form(driver)
+    time.sleep(6)
+
+    # После SMS Ozon обычно просит код-пароль — его бот знает.
+    if detect_ozon_auth_state(driver) == "needs_pin":
+        maybe_enter_ozon_pin(driver)
+        time.sleep(3)
+
+    driver.get("https://finance.ozon.ru/lk/operations")
+    time.sleep(4)
+    maybe_enter_ozon_pin(driver)
+
+    state = detect_ozon_auth_state(driver)
+    cookie_count = save_ozon_cookies_from_driver(driver, force=True) if state == "authorized" else 0
+    OZON_AUTH_STATE.update({"state": state, "checked_at": now_iso(), "notified_at": None})
+
+    return {
+        "state": state,
+        "cookie_count": cookie_count,
+        "page_url": driver.current_url,
+        "message": "Вход выполнен, cookies сохранены" if state == "authorized" else f"Состояние: {state}",
+    }
+
+
 def maybe_enter_ozon_pin(driver) -> bool:
     if not OZON_PIN:
         return False
@@ -3506,6 +3691,40 @@ async def run_ozon_payment_check_once() -> None:
         OZON_HEALTH["last_matched_count"] = matched_count
 
 
+async def notify_admin_ozon_reauth_needed(reason: str) -> None:
+    """Зовёт владельца, когда сессия Ozon умерла окончательно.
+
+    Без этого платежи молча переставали сверяться: watcher писал ошибку
+    в лог, а клиенты ждали выдачи.
+    """
+    last_notified = OZON_AUTH_STATE.get("notified_at")
+    if last_notified:
+        previous = parse_iso_datetime(str(last_notified))
+        if previous and (datetime.now(UTC) - previous).total_seconds() < OZON_REAUTH_NOTIFY_INTERVAL_SECONDS:
+            return
+
+    OZON_AUTH_STATE["notified_at"] = now_iso()
+    text = (
+        "🔴 <b>Сессия Ozon истекла</b>\n\n"
+        "Автосверка платежей остановлена: оплаты картой сейчас не подтверждаются "
+        "автоматически.\n\n"
+        f"<i>{esc(reason)[:300]}</i>\n\n"
+        "Войдите заново: <b>/admin → 🛠 Ozon → 🔑 Войти заново</b>\n"
+        "Понадобится код из SMS."
+    )
+    try:
+        await send_telegram_message(BOT_TOKEN, ADMIN_CHAT_ID, text)
+    except Exception:
+        logger.exception("Не удалось уведомить админа о протухшей сессии Ozon")
+
+
+def ozon_error_needs_reauth(error: str) -> bool:
+    """Отличает «нужен человек» от обычного сетевого сбоя."""
+    lowered = str(error).lower()
+    markers = ("no_bank_auth", "unauthorized", "401", "403", "needs_phone", "needs_sms", "не авторизован")
+    return any(marker in lowered for marker in markers)
+
+
 async def ozon_payment_watcher_loop() -> None:
     if not OZON_ENABLED:
         logger.warning("Ozon payment watcher is disabled: no Selenium profile or cookies configured")
@@ -3513,6 +3732,8 @@ async def ozon_payment_watcher_loop() -> None:
     while True:
         try:
             await run_ozon_payment_check_once()
+            # Успешный проход means сессия жива — снимаем флаг уведомления.
+            OZON_AUTH_STATE.update({"state": "authorized", "checked_at": now_iso(), "notified_at": None})
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -3524,6 +3745,9 @@ async def ozon_payment_watcher_loop() -> None:
                 }
             )
             logger.exception("Ozon payment watcher failed")
+            if ozon_error_needs_reauth(str(exc)):
+                OZON_AUTH_STATE.update({"state": "needs_phone", "checked_at": now_iso()})
+                await notify_admin_ozon_reauth_needed(str(exc))
         await asyncio.sleep(max(5, OZON_CHECK_INTERVAL_SECONDS))
 
 
@@ -3785,6 +4009,35 @@ async def admin_update_secrets(payload: AdminSecretsUpdateRequest, _: None = Dep
         "wallet_address": wallet_address_from_mnemonic,
         "status": secrets_status(),
     }
+
+
+class OzonLoginStartRequest(BaseModel):
+    phone: str = Field(..., min_length=10)
+
+
+class OzonLoginCodeRequest(BaseModel):
+    code: str = Field(..., min_length=3)
+
+
+@app.get("/admin/ozon/auth-state")
+async def ozon_auth_state_endpoint(_: None = Depends(require_admin_token)):
+    return {"ok": True, **OZON_AUTH_STATE}
+
+
+@app.post("/admin/ozon/login/start")
+async def ozon_login_start_endpoint(payload: OzonLoginStartRequest, _: None = Depends(require_admin_token)):
+    """Шаг 1: вводим телефон, Ozon присылает SMS."""
+    async with get_ozon_check_lock():
+        result = await asyncio.to_thread(ozon_login_start, payload.phone)
+    return {"ok": True, **result}
+
+
+@app.post("/admin/ozon/login/code")
+async def ozon_login_code_endpoint(payload: OzonLoginCodeRequest, _: None = Depends(require_admin_token)):
+    """Шаг 2: вводим код из SMS, затем код-пароль."""
+    async with get_ozon_check_lock():
+        result = await asyncio.to_thread(ozon_login_submit_code, payload.code)
+    return {"ok": result.get("state") == "authorized", **result}
 
 
 @app.post("/admin/ozon/cookies")

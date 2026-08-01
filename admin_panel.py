@@ -65,6 +65,8 @@ class AdminStates(StatesGroup):
     waiting_broadcast_video = State()
     waiting_ozon_cookies = State()
     waiting_secret_value = State()
+    waiting_ozon_phone = State()
+    waiting_ozon_sms = State()
 
 
 # Поля мастера настройки. Значения принимаются в чат и сразу пишутся в .env,
@@ -208,9 +210,10 @@ def broadcast_keyboard() -> InlineKeyboardMarkup:
 def ozon_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="🔑 Войти заново", callback_data="ozon:login")],
             [
                 InlineKeyboardButton(text="🔄 Обновить статус", callback_data="ozon:refresh"),
-                InlineKeyboardButton(text="🍪 Обновить cookies", callback_data="ozon:cookies"),
+                InlineKeyboardButton(text="🍪 Вставить cookies", callback_data="ozon:cookies"),
             ],
             [InlineKeyboardButton(text="🏠 Админ-меню", callback_data="panel:menu")],
         ]
@@ -1077,6 +1080,99 @@ async def panel_ozon_callback(callback: CallbackQuery, state: FSMContext) -> Non
         return
     await callback.message.edit_text(format_ozon_status(result), reply_markup=ozon_keyboard())
     await callback.answer("Обновлено")
+
+
+@router.callback_query(F.data == "ozon:login")
+async def ozon_login_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AdminStates.waiting_ozon_phone)
+    await callback.message.edit_text(
+        "🔑 <b>Вход в Ozon</b>\n\n"
+        "Отправьте номер телефона от аккаунта Ozon одним сообщением.\n"
+        "Формат: <code>79001234567</code>\n\n"
+        "Ozon пришлёт SMS с кодом — его я спрошу следующим шагом.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Отмена", callback_data="panel:ozon")]
+        ]),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_ozon_phone, F.text)
+async def ozon_phone_handler(message: Message, state: FSMContext) -> None:
+    phone = (message.text or "").strip()
+    await state.clear()
+
+    progress = await message.answer("📲 Открываю Ozon и запрашиваю код... Это занимает до минуты.")
+    status_code, result = await backend_post("/admin/ozon/login/start", {"phone": phone})
+
+    if status_code >= 400:
+        await progress.edit_text(
+            f"❌ Не удалось начать вход:\n<code>{parse_backend_error(result)}</code>",
+            reply_markup=ozon_keyboard(),
+        )
+        return
+
+    auth_state = (result or {}).get("state")
+    if auth_state == "authorized":
+        await progress.edit_text(
+            "✅ Сессия Ozon оказалась живой — повторный вход не нужен.",
+            reply_markup=ozon_keyboard(),
+        )
+        return
+
+    if auth_state != "needs_sms":
+        await progress.edit_text(
+            f"⚠️ Ozon показал неожиданное состояние: <code>{esc(auth_state)}</code>\n\n"
+            "Попробуйте ещё раз или обновите cookies вручную.",
+            reply_markup=ozon_keyboard(),
+        )
+        return
+
+    await state.set_state(AdminStates.waiting_ozon_sms)
+    await progress.edit_text(
+        "📩 <b>Код отправлен</b>\n\n"
+        "Пришлите код из SMS одним сообщением — только цифры.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Отмена", callback_data="panel:ozon")]
+        ]),
+    )
+
+
+@router.message(AdminStates.waiting_ozon_sms, F.text)
+async def ozon_sms_handler(message: Message, state: FSMContext) -> None:
+    code = (message.text or "").strip()
+    await state.clear()
+
+    # Код одноразовый, но пусть не висит в истории чата.
+    try:
+        await message.delete()
+    except Exception:
+        logger.debug("Не удалось удалить сообщение с кодом Ozon")
+
+    progress = await message.answer("🔐 Ввожу код и код-пароль...")
+    status_code, result = await backend_post("/admin/ozon/login/code", {"code": code})
+
+    if status_code >= 400:
+        await progress.edit_text(
+            f"❌ Не удалось войти:\n<code>{parse_backend_error(result)}</code>",
+            reply_markup=ozon_keyboard(),
+        )
+        return
+
+    if (result or {}).get("state") == "authorized":
+        await progress.edit_text(
+            "✅ <b>Вход выполнен</b>\n\n"
+            f"Cookies сохранены: <code>{esc((result or {}).get('cookie_count', 0))}</code>\n"
+            "Автосверка платежей возобновлена.",
+            reply_markup=ozon_keyboard(),
+        )
+        return
+
+    await progress.edit_text(
+        f"⚠️ Войти не удалось. Состояние: <code>{esc((result or {}).get('state'))}</code>\n\n"
+        "Проверьте, что код введён верно и не истёк, и попробуйте снова.",
+        reply_markup=ozon_keyboard(),
+    )
 
 
 @router.callback_query(F.data == "ozon:cookies")
