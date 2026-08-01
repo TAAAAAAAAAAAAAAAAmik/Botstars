@@ -3625,6 +3625,15 @@ async def ozon_payment_debug(_: None = Depends(require_admin_token)):
     }
 
 
+# Куки Fragment задаются по одной: вводить JSON целиком с телефона неудобно,
+# да и протухает обычно только одна из них.
+FRAGMENT_COOKIE_KEYS = {
+    "FRAGMENT_COOKIE_STEL_SSID": "stel_ssid",
+    "FRAGMENT_COOKIE_STEL_TOKEN": "stel_token",
+    "FRAGMENT_COOKIE_STEL_TON_TOKEN": "stel_ton_token",
+    "FRAGMENT_COOKIE_STEL_DT": "stel_dt",
+}
+
 # Только эти ключи разрешено менять через админ-панель.
 EDITABLE_SECRET_KEYS = {
     "FRAGMENT_WALLET_MNEMONIC",
@@ -3638,14 +3647,47 @@ EDITABLE_SECRET_KEYS = {
     "PAYMENT_REQUISITES_TEXT",
     "TONCENTER_API_KEY",
     "SUPPORT_USERNAME",
-}
+} | set(FRAGMENT_COOKIE_KEYS)
+
+
+def load_fragment_cookies() -> dict[str, str]:
+    """Текущие куки Fragment из окружения. Ошибки разбора не критичны."""
+    raw = os.getenv("FRAGMENT_COOKIES_JSON", "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def normalize_cookie_value(cookie_name: str, raw: str) -> str:
+    """Приводит введённое значение к чистому виду.
+
+    Часто копируют целиком «stel_token=abc123;» — отрезаем имя и точку с запятой,
+    чтобы не заставлять пользователя чистить строку вручную.
+    """
+    value = str(raw).strip().rstrip(";").strip()
+    prefix = f"{cookie_name}="
+    if value.lower().startswith(prefix.lower()):
+        value = value[len(prefix):].strip()
+    if value.startswith('"') and value.endswith('"') and len(value) > 1:
+        value = value[1:-1]
+    return value.strip()
 
 
 def secrets_status() -> dict[str, bool]:
     """Какие секреты заданы. Значения не возвращаются никогда."""
     status: dict[str, bool] = {}
     for key in sorted(EDITABLE_SECRET_KEYS):
+        if key in FRAGMENT_COOKIE_KEYS:
+            continue
         status[key] = bool(os.getenv(key, "").strip())
+
+    cookies = load_fragment_cookies()
+    for pseudo_key, cookie_name in FRAGMENT_COOKIE_KEYS.items():
+        status[pseudo_key] = bool(cookies.get(cookie_name, "").strip())
     return status
 
 
@@ -3662,14 +3704,36 @@ async def admin_update_secrets(payload: AdminSecretsUpdateRequest, _: None = Dep
     Значения намеренно нигде не логируются.
     """
     updates: dict[str, str] = {}
+    cookie_updates: dict[str, str] = {}
+
     for raw_key, raw_value in payload.secrets.items():
         key = str(raw_key).strip().upper()
         if key not in EDITABLE_SECRET_KEYS:
             raise HTTPException(status_code=400, detail=f"Key is not editable: {key}")
+
+        if key in FRAGMENT_COOKIE_KEYS:
+            cookie_name = FRAGMENT_COOKIE_KEYS[key]
+            value = normalize_cookie_value(cookie_name, raw_value)
+            if not value:
+                raise HTTPException(status_code=400, detail=f"Empty value for {cookie_name}")
+            if any(ch in value for ch in ";\n\r \t"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{cookie_name}: значение не должно содержать пробелов и «;»",
+                )
+            cookie_updates[cookie_name] = value
+            continue
+
         value = str(raw_value).strip()
         if not value:
             raise HTTPException(status_code=400, detail=f"Empty value for {key}")
         updates[key] = value
+
+    # Отдельные куки дописываются в общий JSON, остальные остаются на месте.
+    if cookie_updates:
+        cookies = load_fragment_cookies()
+        cookies.update(cookie_updates)
+        updates["FRAGMENT_COOKIES_JSON"] = json.dumps(cookies, ensure_ascii=False, separators=(",", ":"))
 
     if not updates:
         raise HTTPException(status_code=400, detail="No secrets provided")

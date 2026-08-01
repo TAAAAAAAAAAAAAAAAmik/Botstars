@@ -83,11 +83,29 @@ SECRET_FIELDS: dict[str, dict[str, str]] = {
         "title": "💎 Адрес TON-кошелька",
         "prompt": "Отправьте адрес кошелька (начинается с <code>EQ</code> или <code>UQ</code>).",
     },
-    "FRAGMENT_COOKIES_JSON": {
-        "title": "🍪 Cookies Fragment",
+    "FRAGMENT_COOKIE_STEL_SSID": {
+        "title": "🍪 Fragment: stel_ssid",
         "prompt": (
-            "Отправьте cookies Fragment одной строкой JSON, например:\n"
-            "<code>{\"stel_ssid\":\"...\",\"stel_token\":\"...\"}</code>"
+            "Отправьте значение cookie <code>stel_ssid</code>.\n\n"
+            "Можно прислать как чистое значение, так и целиком "
+            "<code>stel_ssid=abc123</code> — лишнее я уберу сам."
+        ),
+    },
+    "FRAGMENT_COOKIE_STEL_TOKEN": {
+        "title": "🍪 Fragment: stel_token",
+        "prompt": "Отправьте значение cookie <code>stel_token</code>.",
+    },
+    "FRAGMENT_COOKIE_STEL_TON_TOKEN": {
+        "title": "🍪 Fragment: stel_ton_token",
+        "prompt": "Отправьте значение cookie <code>stel_ton_token</code>.",
+    },
+    "FRAGMENT_COOKIES_JSON": {
+        "title": "🍪 Fragment: все cookies разом",
+        "prompt": (
+            "Отправьте cookies Fragment одной строкой JSON:\n"
+            "<code>{\"stel_ssid\":\"...\",\"stel_token\":\"...\"}</code>\n\n"
+            "⚠️ Это заменит все cookies целиком. Чтобы обновить одну — "
+            "используйте отдельные пункты выше."
         ),
     },
     "FRAGMENT_HASH": {

@@ -322,10 +322,17 @@ def test_blacklisted_user_cannot_create_order(client):
 
 @pytest.fixture()
 def env_sandbox(client, tmp_path, monkeypatch):
-    """Изолированный .env, чтобы тесты не трогали реальный файл."""
+    """Изолированный .env, чтобы тесты не трогали реальный файл.
+
+    Секреты применяются ещё и в os.environ, поэтому его тоже чистим —
+    иначе значения протекают из теста в тест.
+    """
     env_file = tmp_path / ".env"
     env_file.write_text("BOT_TOKEN=123:test\nCARD_NUMBER=\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+
+    for key in client.main.EDITABLE_SECRET_KEYS | {"FRAGMENT_COOKIES_JSON"}:
+        monkeypatch.delenv(key, raising=False)
     return env_file
 
 
@@ -442,3 +449,86 @@ def test_secrets_creates_env_backup(client, env_sandbox):
         headers={"X-Backend-Token": ADMIN_TOKEN},
     )
     assert (env_sandbox.parent / ".env.bak").exists(), "резервная копия .env не создана"
+
+
+# ---------------------------------------------------------------------------
+# Cookies Fragment по отдельности
+# ---------------------------------------------------------------------------
+
+
+def _cookies(client, env_sandbox) -> dict:
+    """Текущие cookies из .env."""
+    import json as _json
+    for line in env_sandbox.read_text(encoding="utf-8").splitlines():
+        if line.startswith("FRAGMENT_COOKIES_JSON="):
+            raw = line.split("=", 1)[1]
+            return _json.loads(raw) if raw else {}
+    return {}
+
+
+def _set_cookie(client, key: str, value: str):
+    return client.post(
+        "/admin/secrets",
+        json={"secrets": {key: value}},
+        headers={"X-Backend-Token": ADMIN_TOKEN},
+    )
+
+
+def test_single_cookie_is_saved(client, env_sandbox):
+    assert _set_cookie(client, "FRAGMENT_COOKIE_STEL_SSID", "abc123").status_code == 200
+    assert _cookies(client, env_sandbox) == {"stel_ssid": "abc123"}
+
+
+def test_cookies_merge_and_do_not_overwrite_each_other(client, env_sandbox):
+    """Обновление одной cookie не стирает остальные."""
+    _set_cookie(client, "FRAGMENT_COOKIE_STEL_SSID", "ssid1")
+    _set_cookie(client, "FRAGMENT_COOKIE_STEL_TOKEN", "token1")
+    _set_cookie(client, "FRAGMENT_COOKIE_STEL_TON_TOKEN", "ton1")
+
+    assert _cookies(client, env_sandbox) == {
+        "stel_ssid": "ssid1",
+        "stel_token": "token1",
+        "stel_ton_token": "ton1",
+    }
+
+    # Протух только stel_token — меняем его одного.
+    _set_cookie(client, "FRAGMENT_COOKIE_STEL_TOKEN", "token2")
+    assert _cookies(client, env_sandbox) == {
+        "stel_ssid": "ssid1",
+        "stel_token": "token2",
+        "stel_ton_token": "ton1",
+    }
+
+
+def test_cookie_value_is_normalized(client, env_sandbox):
+    """Скопированное целиком «stel_token=abc;» очищается автоматически."""
+    _set_cookie(client, "FRAGMENT_COOKIE_STEL_TOKEN", "stel_token=abc123;")
+    assert _cookies(client, env_sandbox) == {"stel_token": "abc123"}
+
+
+def test_cookie_rejects_value_with_spaces(client, env_sandbox):
+    response = _set_cookie(client, "FRAGMENT_COOKIE_STEL_SSID", "abc 123; stel_token=x")
+    assert response.status_code == 400
+
+
+def test_cookie_rejects_empty_value(client, env_sandbox):
+    assert _set_cookie(client, "FRAGMENT_COOKIE_STEL_SSID", "stel_ssid=").status_code == 400
+
+
+def test_cookie_status_reports_each_cookie(client, env_sandbox):
+    _set_cookie(client, "FRAGMENT_COOKIE_STEL_SSID", "ssid1")
+    status = client.get("/admin/secrets", headers={"X-Backend-Token": ADMIN_TOKEN}).json()["status"]
+
+    assert status["FRAGMENT_COOKIE_STEL_SSID"] is True
+    assert status["FRAGMENT_COOKIE_STEL_TOKEN"] is False
+    assert all(isinstance(v, bool) for v in status.values()), "статус вернул значения"
+
+
+def test_full_json_still_works(client, env_sandbox):
+    response = client.post(
+        "/admin/secrets",
+        json={"secrets": {"FRAGMENT_COOKIES_JSON": '{"stel_ssid":"x","stel_token":"y"}'}},
+        headers={"X-Backend-Token": ADMIN_TOKEN},
+    )
+    assert response.status_code == 200
+    assert _cookies(client, env_sandbox) == {"stel_ssid": "x", "stel_token": "y"}
