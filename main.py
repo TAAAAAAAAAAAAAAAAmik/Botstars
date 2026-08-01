@@ -30,7 +30,10 @@ from fragment_service import (
     make_session,
     normalize_recipient,
     search_stars_recipient,
+    validate_address,
+    validate_mnemonic,
 )
+from fragment_service import apply_runtime_config as apply_fragment_runtime_config
 
 load_dotenv(dotenv_path=".env")
 logging.basicConfig(level=logging.INFO)
@@ -339,6 +342,16 @@ class AdminBlacklistRequest(BaseModel):
     is_blacklisted: bool
     reason: str = ""
     processed_by: Optional[int] = None
+
+
+class AdminSecretsUpdateRequest(BaseModel):
+    """Обновление секретов из админ-панели.
+
+    Ключи ограничены белым списком: держатель админ-токена не должен иметь
+    возможности записать в .env произвольную переменную.
+    """
+
+    secrets: dict[str, str] = Field(default_factory=dict)
 
 
 def now_iso() -> str:
@@ -3609,6 +3622,104 @@ async def ozon_payment_debug(_: None = Depends(require_admin_token)):
         "last_fetch": OZON_LAST_FETCH_DEBUG,
         "pending_count": len(pending),
         "pending_sample": pending_sample,
+    }
+
+
+# Только эти ключи разрешено менять через админ-панель.
+EDITABLE_SECRET_KEYS = {
+    "FRAGMENT_WALLET_MNEMONIC",
+    "FRAGMENT_ACCOUNT_ADDRESS",
+    "FRAGMENT_COOKIES_JSON",
+    "FRAGMENT_HASH",
+    "OZON_PIN",
+    "CARD_NUMBER",
+    "CARD_DISPLAY",
+    "CARD_HOLDER",
+    "PAYMENT_REQUISITES_TEXT",
+    "TONCENTER_API_KEY",
+    "SUPPORT_USERNAME",
+}
+
+
+def secrets_status() -> dict[str, bool]:
+    """Какие секреты заданы. Значения не возвращаются никогда."""
+    status: dict[str, bool] = {}
+    for key in sorted(EDITABLE_SECRET_KEYS):
+        status[key] = bool(os.getenv(key, "").strip())
+    return status
+
+
+@app.get("/admin/secrets")
+async def admin_get_secrets_status(_: None = Depends(require_admin_token)):
+    """Возвращает только факт «задано / не задано», без самих значений."""
+    return {"ok": True, "status": secrets_status()}
+
+
+@app.post("/admin/secrets")
+async def admin_update_secrets(payload: AdminSecretsUpdateRequest, _: None = Depends(require_admin_token)):
+    """Записывает секреты в .env и применяет их без перезапуска.
+
+    Значения намеренно нигде не логируются.
+    """
+    updates: dict[str, str] = {}
+    for raw_key, raw_value in payload.secrets.items():
+        key = str(raw_key).strip().upper()
+        if key not in EDITABLE_SECRET_KEYS:
+            raise HTTPException(status_code=400, detail=f"Key is not editable: {key}")
+        value = str(raw_value).strip()
+        if not value:
+            raise HTTPException(status_code=400, detail=f"Empty value for {key}")
+        updates[key] = value
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No secrets provided")
+
+    # Проверяем до записи: битая сид-фраза не должна попасть в .env.
+    wallet_address_from_mnemonic: str | None = None
+    if "FRAGMENT_WALLET_MNEMONIC" in updates:
+        try:
+            wallet_address_from_mnemonic = validate_mnemonic(updates["FRAGMENT_WALLET_MNEMONIC"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if "FRAGMENT_ACCOUNT_ADDRESS" in updates:
+        try:
+            validate_address(updates["FRAGMENT_ACCOUNT_ADDRESS"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if "FRAGMENT_COOKIES_JSON" in updates:
+        try:
+            parsed = json.loads(updates["FRAGMENT_COOKIES_JSON"])
+            if not isinstance(parsed, dict) or not parsed:
+                raise ValueError("ожидается непустой JSON-объект")
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"FRAGMENT_COOKIES_JSON: {exc}") from exc
+
+    if "OZON_PIN" in updates and not updates["OZON_PIN"].isdigit():
+        raise HTTPException(status_code=400, detail="OZON_PIN должен состоять только из цифр")
+
+    if "CARD_NUMBER" in updates:
+        digits = updates["CARD_NUMBER"].replace(" ", "")
+        if not digits.isdigit() or not (12 <= len(digits) <= 19):
+            raise HTTPException(status_code=400, detail="CARD_NUMBER: ожидается 12-19 цифр")
+        updates["CARD_NUMBER"] = digits
+        updates.setdefault("CARD_DISPLAY", digits)
+
+    update_env_file_values(updates)
+
+    # Применяем в памяти, чтобы новые значения заработали без restart.
+    for key, value in updates.items():
+        os.environ[key] = value
+    globals().update({key: value for key, value in updates.items() if key in globals()})
+    apply_fragment_runtime_config(updates)
+
+    logger.info("Обновлены секреты через админ-панель: %s", ", ".join(sorted(updates)))
+    return {
+        "ok": True,
+        "updated": sorted(updates),
+        "wallet_address": wallet_address_from_mnemonic,
+        "status": secrets_status(),
     }
 
 

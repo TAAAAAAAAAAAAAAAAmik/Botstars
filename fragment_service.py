@@ -76,6 +76,64 @@ _fragment_hash_cache: dict[str, Any] = {
 FRAGMENT_HASH_CACHE_TTL_SECONDS = 300
 
 
+def apply_runtime_config(updates: dict[str, str]) -> None:
+    """Обновляет конфигурацию Fragment без перезапуска процесса.
+
+    Значения читаются в модульные переменные при импорте, поэтому после
+    записи в .env их нужно применить и в памяти — иначе новые куки или
+    кошелёк подхватятся только после restart.
+    """
+    global FRAGMENT_HASH, FRAGMENT_COOKIES_JSON, FRAGMENT_ACCOUNT_ADDRESS
+    global FRAGMENT_ACCOUNT_CHAIN, FRAGMENT_WALLET_MNEMONIC, FRAGMENT_WALLET_VERSION
+
+    mapping = {
+        "FRAGMENT_HASH": "FRAGMENT_HASH",
+        "FRAGMENT_COOKIES_JSON": "FRAGMENT_COOKIES_JSON",
+        "FRAGMENT_ACCOUNT_ADDRESS": "FRAGMENT_ACCOUNT_ADDRESS",
+        "FRAGMENT_ACCOUNT_CHAIN": "FRAGMENT_ACCOUNT_CHAIN",
+        "FRAGMENT_WALLET_MNEMONIC": "FRAGMENT_WALLET_MNEMONIC",
+        "FRAGMENT_WALLET_VERSION": "FRAGMENT_WALLET_VERSION",
+    }
+    for key, value in updates.items():
+        if key in mapping:
+            globals()[mapping[key]] = str(value).strip()
+
+    if "FRAGMENT_HASH" in updates:
+        _fragment_hash_cache["value"] = FRAGMENT_HASH
+        _fragment_hash_cache["expires_at"] = 0.0
+    elif "FRAGMENT_COOKIES_JSON" in updates:
+        # Новые куки — старый hash мог протухнуть вместе со старой сессией.
+        _fragment_hash_cache["expires_at"] = 0.0
+
+
+def validate_mnemonic(mnemonic: str) -> str:
+    """Проверяет сид-фразу и возвращает адрес кошелька.
+
+    Так админ сразу видит, что фраза введена верно и относится к тому
+    кошельку, с которого ожидается списание.
+    """
+    words = [word.strip().lower() for word in mnemonic.split() if word.strip()]
+    if len(words) not in (12, 18, 24):
+        raise ValueError(f"Ожидается 12, 18 или 24 слова, получено {len(words)}")
+    if not all(word.isalpha() and word.isascii() for word in words):
+        raise ValueError("Сид-фраза должна состоять только из латинских слов")
+
+    try:
+        _, _, _, wallet = Wallets.from_mnemonics(words, get_wallet_version(), workchain=0)
+    except Exception as exc:
+        raise ValueError(f"Некорректная сид-фраза: {exc}") from exc
+
+    return wallet.address.to_string(is_user_friendly=True, is_url_safe=True, is_bounceable=False)
+
+
+def validate_address(address: str) -> str:
+    """Проверяет адрес TON-кошелька."""
+    try:
+        return Address(address.strip()).to_string(is_user_friendly=True, is_url_safe=True, is_bounceable=False)
+    except Exception as exc:
+        raise ValueError(f"Некорректный адрес TON: {exc}") from exc
+
+
 def require_env(name: str, value: str) -> None:
     if not value:
         raise ValueError(f"{name} не найден в .env")

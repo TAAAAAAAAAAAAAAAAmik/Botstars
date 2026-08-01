@@ -64,6 +64,57 @@ class AdminStates(StatesGroup):
     waiting_broadcast_photo = State()
     waiting_broadcast_video = State()
     waiting_ozon_cookies = State()
+    waiting_secret_value = State()
+
+
+# Поля мастера настройки. Значения принимаются в чат и сразу пишутся в .env,
+# а сообщение с секретом удаляется.
+SECRET_FIELDS: dict[str, dict[str, str]] = {
+    "FRAGMENT_WALLET_MNEMONIC": {
+        "title": "🔑 Сид-фраза кошелька",
+        "prompt": (
+            "Отправьте сид-фразу одним сообщением: 24 слова через пробел.\n\n"
+            "Сообщение будет удалено сразу после проверки, а в ответ покажу "
+            "адрес кошелька — сверьте его со своим."
+        ),
+        "danger": "1",
+    },
+    "FRAGMENT_ACCOUNT_ADDRESS": {
+        "title": "💎 Адрес TON-кошелька",
+        "prompt": "Отправьте адрес кошелька (начинается с <code>EQ</code> или <code>UQ</code>).",
+    },
+    "FRAGMENT_COOKIES_JSON": {
+        "title": "🍪 Cookies Fragment",
+        "prompt": (
+            "Отправьте cookies Fragment одной строкой JSON, например:\n"
+            "<code>{\"stel_ssid\":\"...\",\"stel_token\":\"...\"}</code>"
+        ),
+    },
+    "FRAGMENT_HASH": {
+        "title": "🧩 Fragment hash",
+        "prompt": "Отправьте значение <code>hash</code> из адресной строки fragment.com.",
+    },
+    "OZON_PIN": {
+        "title": "🔢 PIN Ozon",
+        "prompt": "Отправьте PIN от приложения Ozon (только цифры).",
+    },
+    "CARD_NUMBER": {
+        "title": "💳 Номер карты",
+        "prompt": "Отправьте номер карты для приёма оплаты (12-19 цифр).",
+    },
+    "CARD_HOLDER": {
+        "title": "👤 Владелец карты",
+        "prompt": "Отправьте имя владельца карты, как указано в банке.",
+    },
+    "TONCENTER_API_KEY": {
+        "title": "🔌 Ключ toncenter",
+        "prompt": "Отправьте API-ключ toncenter (получить: @tonapibot).",
+    },
+    "SUPPORT_USERNAME": {
+        "title": "🆘 Username поддержки",
+        "prompt": "Отправьте username поддержки вместе с @.",
+    },
+}
 
 
 # --------------------------------------------------------------------------
@@ -94,6 +145,7 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🛠 Ozon", callback_data="panel:ozon"),
                 InlineKeyboardButton(text="🚨 Разбор", callback_data="panel:review"),
             ],
+            [InlineKeyboardButton(text="🔐 Настройка доступов", callback_data="panel:secrets")],
             [InlineKeyboardButton(text="🛒 В клиентское меню", callback_data="back_menu")],
         ]
     )
@@ -1044,6 +1096,152 @@ async def ozon_cookies_state_handler(message: Message, state: FSMContext) -> Non
         f"Cookies: <code>{esc(result.get('cookie_count'))}</code>\n"
         f"Видно операций: <code>{esc(result.get('operations_count'))}</code>",
         reply_markup=ozon_keyboard(),
+    )
+
+
+# --------------------------------------------------------------------------
+# Мастер настройки доступов
+# --------------------------------------------------------------------------
+
+
+def secrets_keyboard(status: dict[str, bool]) -> InlineKeyboardMarkup:
+    rows = []
+    for key, meta in SECRET_FIELDS.items():
+        mark = "✅" if status.get(key) else "⬜"
+        rows.append([InlineKeyboardButton(text=f"{mark} {meta['title']}", callback_data=f"secret:{key}")])
+    rows.append([InlineKeyboardButton(text="🏠 Админ-меню", callback_data="panel:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def render_secrets_menu(target: Message | CallbackQuery, edit: bool = True) -> None:
+    status_code, result = await backend_get("/admin/secrets")
+    if status_code >= 400:
+        text = f"❌ Не удалось получить статус: <code>{parse_backend_error(result)}</code>"
+        status: dict[str, bool] = {}
+    else:
+        status = (result or {}).get("status") or {}
+        filled = sum(1 for key in SECRET_FIELDS if status.get(key))
+        text = (
+            "🔐 <b>Настройка доступов</b>\n\n"
+            f"Заполнено: <b>{filled}</b> из <b>{len(SECRET_FIELDS)}</b>\n\n"
+            "Нажмите на пункт и отправьте значение следующим сообщением — "
+            "оно сразу запишется в конфигурацию, а сообщение будет удалено.\n\n"
+            "✅ — задано, ⬜ — не задано. Сами значения не показываются никогда."
+        )
+
+    markup = secrets_keyboard(status)
+    if isinstance(target, CallbackQuery) and edit and target.message:
+        await target.message.edit_text(text, reply_markup=markup)
+    else:
+        message = target.message if isinstance(target, CallbackQuery) else target
+        await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data == "panel:secrets")
+async def panel_secrets_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await render_secrets_menu(callback)
+    await callback.answer()
+
+
+@router.message(Command("setup"))
+async def setup_command_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await render_secrets_menu(message)
+
+
+@router.callback_query(F.data.startswith("secret:"))
+async def secret_select_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    key = callback.data.split(":", 1)[1]
+    meta = SECRET_FIELDS.get(key)
+    if not meta:
+        await callback.answer("Неизвестный параметр", show_alert=True)
+        return
+
+    await state.set_state(AdminStates.waiting_secret_value)
+    await state.update_data(secret_key=key)
+
+    text = f"<b>{esc(meta['title'])}</b>\n\n{meta['prompt']}"
+    if meta.get("danger"):
+        text += (
+            "\n\n⚠️ <b>Важно.</b> Сообщения в Telegram не имеют сквозного шифрования "
+            "и проходят через серверы Telegram. Я удалю ваше сообщение сразу, но "
+            "если у вас есть возможность вписать фразу на сервере командой "
+            "<code>python3 setup_env.py</code> — это безопаснее."
+        )
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Отмена", callback_data="panel:secrets")]
+        ]),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_secret_value, F.text)
+async def secret_value_handler(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    key = str(data.get("secret_key") or "")
+    meta = SECRET_FIELDS.get(key)
+    await state.clear()
+
+    if not meta:
+        await message.answer("Сессия настройки истекла.", reply_markup=admin_menu_keyboard())
+        return
+
+    value = (message.text or "").strip()
+
+    # Удаляем сообщение с секретом до любых сетевых запросов.
+    deleted = True
+    try:
+        await message.delete()
+    except Exception:
+        deleted = False
+        logger.warning("Не удалось удалить сообщение с секретом %s", key)
+
+    status_code, result = await backend_post("/admin/secrets", {"secrets": {key: value}})
+
+    if status_code >= 400:
+        await message.answer(
+            f"❌ <b>{esc(meta['title'])}</b> — не сохранено.\n\n"
+            f"<code>{parse_backend_error(result)}</code>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔁 Попробовать снова", callback_data=f"secret:{key}")],
+                [InlineKeyboardButton(text="⬅️ К настройкам", callback_data="panel:secrets")],
+            ]),
+        )
+        return
+
+    lines = [f"✅ <b>{esc(meta['title'])}</b> — сохранено."]
+
+    wallet_address = (result or {}).get("wallet_address")
+    if wallet_address:
+        lines.append(
+            f"\n💎 Кошелёк этой фразы:\n<code>{esc(wallet_address)}</code>\n"
+            "\n⚠️ Сверьте адрес. Если он не ваш — немедленно замените фразу."
+        )
+
+    if not deleted:
+        lines.append(
+            "\n⚠️ Не удалось удалить ваше сообщение автоматически — удалите его вручную."
+        )
+
+    if key in {"CARD_NUMBER", "CARD_HOLDER", "PAYMENT_REQUISITES_TEXT", "SUPPORT_USERNAME"}:
+        lines.append("\n♻️ Перезапустите бота, чтобы реквизиты обновились в клиентских экранах:")
+        lines.append("<code>systemctl restart ara-client-bot</code>")
+
+    await message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ К настройкам", callback_data="panel:secrets")]
+    ]))
+
+
+@router.message(AdminStates.waiting_secret_value)
+async def secret_wrong_type_handler(message: Message) -> None:
+    await message.answer(
+        "Отправьте значение обычным текстом.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ К настройкам", callback_data="panel:secrets")]
+        ]),
     )
 
 

@@ -313,3 +313,132 @@ def test_blacklisted_user_cannot_create_order(client):
         headers={"X-Backend-Token": SERVICE_TOKEN},
     )
     assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Мастер настройки секретов
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def env_sandbox(client, tmp_path, monkeypatch):
+    """Изолированный .env, чтобы тесты не трогали реальный файл."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("BOT_TOKEN=123:test\nCARD_NUMBER=\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    return env_file
+
+
+def test_secrets_endpoint_requires_admin_token(client):
+    assert client.post("/admin/secrets", json={"secrets": {"OZON_PIN": "1234"}}).status_code == 401
+    assert client.post(
+        "/admin/secrets",
+        json={"secrets": {"OZON_PIN": "1234"}},
+        headers={"X-Backend-Token": SERVICE_TOKEN},
+    ).status_code == 403
+
+
+def test_secrets_status_never_returns_values(client, env_sandbox):
+    response = client.get("/admin/secrets", headers={"X-Backend-Token": ADMIN_TOKEN})
+    assert response.status_code == 200
+    status = response.json()["status"]
+    assert all(isinstance(v, bool) for v in status.values()), "статус вернул значения, а не флаги"
+
+
+def test_secrets_rejects_keys_outside_whitelist(client, env_sandbox):
+    """Держатель админ-токена не может записать произвольную переменную."""
+    for bad_key in ("BACKEND_ADMIN_TOKEN", "BOT_TOKEN", "ORDERS_DB_PATH", "PATH"):
+        response = client.post(
+            "/admin/secrets",
+            json={"secrets": {bad_key: "hacked"}},
+            headers={"X-Backend-Token": ADMIN_TOKEN},
+        )
+        assert response.status_code == 400, f"{bad_key} принят к записи!"
+
+
+def test_secrets_writes_card_number(client, env_sandbox):
+    response = client.post(
+        "/admin/secrets",
+        json={"secrets": {"CARD_NUMBER": "2200 1234 5678 9012"}},
+        headers={"X-Backend-Token": ADMIN_TOKEN},
+    )
+    assert response.status_code == 200
+    content = env_sandbox.read_text(encoding="utf-8")
+    assert "CARD_NUMBER=2200123456789012" in content, "пробелы не убраны или значение не записано"
+    assert "BOT_TOKEN=123:test" in content, "существующие значения потеряны"
+
+
+def test_secrets_rejects_bad_card_number(client, env_sandbox):
+    response = client.post(
+        "/admin/secrets",
+        json={"secrets": {"CARD_NUMBER": "abcd"}},
+        headers={"X-Backend-Token": ADMIN_TOKEN},
+    )
+    assert response.status_code == 400
+
+
+def test_secrets_rejects_bad_pin(client, env_sandbox):
+    response = client.post(
+        "/admin/secrets",
+        json={"secrets": {"OZON_PIN": "не цифры"}},
+        headers={"X-Backend-Token": ADMIN_TOKEN},
+    )
+    assert response.status_code == 400
+
+
+def test_secrets_rejects_invalid_mnemonic(client, env_sandbox):
+    """Битая сид-фраза не должна попасть в .env."""
+    response = client.post(
+        "/admin/secrets",
+        json={"secrets": {"FRAGMENT_WALLET_MNEMONIC": "всего три слова"}},
+        headers={"X-Backend-Token": ADMIN_TOKEN},
+    )
+    assert response.status_code == 400
+    assert "FRAGMENT_WALLET_MNEMONIC" not in env_sandbox.read_text(encoding="utf-8")
+
+
+def test_secrets_rejects_invalid_cookies_json(client, env_sandbox):
+    response = client.post(
+        "/admin/secrets",
+        json={"secrets": {"FRAGMENT_COOKIES_JSON": "не json"}},
+        headers={"X-Backend-Token": ADMIN_TOKEN},
+    )
+    assert response.status_code == 400
+
+
+def test_secrets_rejects_invalid_address(client, env_sandbox):
+    response = client.post(
+        "/admin/secrets",
+        json={"secrets": {"FRAGMENT_ACCOUNT_ADDRESS": "не-адрес"}},
+        headers={"X-Backend-Token": ADMIN_TOKEN},
+    )
+    assert response.status_code == 400
+
+
+def test_secrets_rejects_newline_injection(client, env_sandbox):
+    """Перенос строки в значении не должен дописать лишнюю переменную в .env."""
+    response = client.post(
+        "/admin/secrets",
+        json={"secrets": {"CARD_HOLDER": "IVAN\nBACKEND_ADMIN_TOKEN=hacked"}},
+        headers={"X-Backend-Token": ADMIN_TOKEN},
+    )
+    assert response.status_code == 400
+    assert "hacked" not in env_sandbox.read_text(encoding="utf-8")
+
+
+def test_secrets_rejects_empty_value(client, env_sandbox):
+    response = client.post(
+        "/admin/secrets",
+        json={"secrets": {"OZON_PIN": "   "}},
+        headers={"X-Backend-Token": ADMIN_TOKEN},
+    )
+    assert response.status_code == 400
+
+
+def test_secrets_creates_env_backup(client, env_sandbox):
+    client.post(
+        "/admin/secrets",
+        json={"secrets": {"CARD_HOLDER": "IVAN IVANOV"}},
+        headers={"X-Backend-Token": ADMIN_TOKEN},
+    )
+    assert (env_sandbox.parent / ".env.bak").exists(), "резервная копия .env не создана"
