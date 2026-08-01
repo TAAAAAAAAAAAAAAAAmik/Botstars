@@ -136,3 +136,88 @@ def test_quantize_money_rounds_half_up():
     assert str(quantize_money("2.345")) == "2.35"
     assert str(quantize_money("2.344")) == "2.34"
     assert str(quantize_money("0.005")) == "0.01"
+
+
+# ---------------------------------------------------------------------------
+# Fragment hash добывается автоматически
+# ---------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _FakeSession:
+    """Сессия, отдающая страницу покупки Stars с зашитым hash."""
+
+    def __init__(self, page: str) -> None:
+        self.page = page
+        self.calls = 0
+
+    def get(self, url: str, timeout: int = 30) -> _FakeResponse:
+        self.calls += 1
+        return _FakeResponse(self.page)
+
+
+def test_hash_is_fetched_from_page_when_not_configured(monkeypatch):
+    """Пустой FRAGMENT_HASH в конфиге не мешает: он берётся со страницы.
+
+    Поэтому искать hash вручную не нужно — достаточно валидных cookies.
+    """
+    import fragment_service as fs
+
+    monkeypatch.setattr(fs, "_fragment_hash_cache", {"value": "", "expires_at": 0.0})
+    session = _FakeSession('<a href="/api?hash=abc123DEF-456_xyz">buy</a>')
+
+    assert fs.get_fresh_fragment_hash(session) == "abc123DEF-456_xyz"
+    assert session.calls == 1
+
+
+def test_hash_is_cached_between_calls(monkeypatch):
+    import fragment_service as fs
+
+    monkeypatch.setattr(fs, "_fragment_hash_cache", {"value": "", "expires_at": 0.0})
+    session = _FakeSession('<a href="/api?hash=cached123">buy</a>')
+
+    fs.get_fresh_fragment_hash(session)
+    fs.get_fresh_fragment_hash(session)
+    assert session.calls == 1, "hash перезапрашивается на каждый вызов"
+
+
+def test_hash_refetched_when_forced(monkeypatch):
+    """При ответе «bad request» hash обновляется принудительно."""
+    import fragment_service as fs
+
+    monkeypatch.setattr(fs, "_fragment_hash_cache", {"value": "", "expires_at": 0.0})
+    session = _FakeSession('<a href="/api?hash=first">buy</a>')
+
+    assert fs.get_fresh_fragment_hash(session) == "first"
+    session.page = '<a href="/api?hash=second">buy</a>'
+    assert fs.get_fresh_fragment_hash(session, force=True) == "second"
+
+
+def test_fragment_config_does_not_require_hash(monkeypatch):
+    """Отсутствие FRAGMENT_HASH больше не блокирует работу Fragment."""
+    import fragment_service as fs
+
+    monkeypatch.setattr(fs, "FRAGMENT_HASH", "")
+    monkeypatch.setattr(fs, "FRAGMENT_COOKIES_JSON", '{"stel_ssid":"x"}')
+    monkeypatch.setattr(fs, "FRAGMENT_ACCOUNT_ADDRESS", VALID_ADDRESS)
+    monkeypatch.setattr(fs, "FRAGMENT_WALLET_MNEMONIC", "word " * 24)
+
+    fs.ensure_fragment_runtime_config()  # не должно бросать исключение
+
+
+def test_fragment_config_still_requires_cookies(monkeypatch):
+    import fragment_service as fs
+
+    monkeypatch.setattr(fs, "FRAGMENT_COOKIES_JSON", "")
+    monkeypatch.setattr(fs, "FRAGMENT_ACCOUNT_ADDRESS", VALID_ADDRESS)
+    monkeypatch.setattr(fs, "FRAGMENT_WALLET_MNEMONIC", "word " * 24)
+
+    with pytest.raises(ValueError, match="FRAGMENT_COOKIES_JSON"):
+        fs.ensure_fragment_runtime_config()

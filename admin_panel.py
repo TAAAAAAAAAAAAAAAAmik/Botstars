@@ -109,8 +109,13 @@ SECRET_FIELDS: dict[str, dict[str, str]] = {
         ),
     },
     "FRAGMENT_HASH": {
-        "title": "🧩 Fragment hash",
-        "prompt": "Отправьте значение <code>hash</code> из адресной строки fragment.com.",
+        "title": "🧩 Fragment hash (не нужен)",
+        "prompt": (
+            "Этот параметр заполнять <b>не требуется</b>: бот сам достаёт "
+            "актуальный hash со страницы Fragment по вашим cookies и обновляет "
+            "его каждые 5 минут.\n\n"
+            "Задавайте вручную, только если точно знаете зачем."
+        ),
     },
     "OZON_PIN": {
         "title": "🔢 PIN Ozon",

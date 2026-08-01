@@ -140,8 +140,13 @@ def require_env(name: str, value: str) -> None:
 
 
 def ensure_fragment_runtime_config() -> None:
+    """Проверяет обязательные настройки Fragment.
+
+    FRAGMENT_HASH сюда намеренно не входит: он живёт минуты и вытаскивается
+    со страницы покупки автоматически (см. get_fresh_fragment_hash), поэтому
+    задавать его вручную бессмысленно — достаточно валидных cookies.
+    """
     for key, value in [
-        ("FRAGMENT_HASH", FRAGMENT_HASH),
         ("FRAGMENT_COOKIES_JSON", FRAGMENT_COOKIES_JSON),
         ("FRAGMENT_ACCOUNT_ADDRESS", FRAGMENT_ACCOUNT_ADDRESS),
         ("FRAGMENT_WALLET_MNEMONIC", FRAGMENT_WALLET_MNEMONIC),

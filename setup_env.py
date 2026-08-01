@@ -77,7 +77,6 @@ FIELDS = [
         "ввод скрыт; храните копию ВНЕ сервера",
         secret=True,
     ),
-    Field("FRAGMENT_HASH", "Fragment hash", "из адресной строки fragment.com", secret=True),
     Field(
         "FRAGMENT_COOKIES_JSON",
         "Cookies Fragment одной строкой JSON",
