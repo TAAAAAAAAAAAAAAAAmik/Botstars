@@ -10,7 +10,7 @@ from urllib.parse import quote_plus
 
 import aiohttp
 import requests
-from aiogram import BaseMiddleware, Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
@@ -104,10 +104,11 @@ THROTTLE_SECONDS = float(os.getenv("THROTTLE_SECONDS", "0.4").strip() or 0.4)
 dp.message.middleware(ThrottlingMiddleware(THROTTLE_SECONDS))
 dp.callback_query.middleware(ThrottlingMiddleware(THROTTLE_SECONDS))
 
-# Админ-роутер подключается первым: он ловит только свои команды, callback-и
-# с известными префиксами и собственные FSM-состояния, поэтому обычные
-# клиентские сценарии для админа продолжают работать.
-dp.include_router(admin_panel.router)
+# Клиентские хендлеры живут в отдельном роутере, а не на самом Dispatcher.
+# Это принципиально: собственные хендлеры роутера проверяются РАНЬШЕ
+# подключённых суб-роутеров, поэтому висящий на dp fallback перехватывал бы
+# /admin и молча удалял сообщение.
+client_router = Router(name="client")
 
 
 LEVELS_TEXT = (
@@ -1496,7 +1497,7 @@ async def show_payment_options_message(
         )
 
 
-@dp.message(Command("start"))
+@client_router.message(Command("start"))
 async def start_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
     settings_task = asyncio.create_task(refresh_settings())
@@ -1585,7 +1586,7 @@ async def start_handler(message: Message, state: FSMContext) -> None:
             logging.exception("Не удалось отправить уведомление о новом реферале")
 
 
-@dp.message(Command("menu"))
+@client_router.message(Command("menu"))
 async def menu_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
     await present_order_screen(
@@ -1597,14 +1598,14 @@ async def menu_handler(message: Message, state: FSMContext) -> None:
     )
 
 
-@dp.callback_query(F.data == "back_menu")
+@client_router.callback_query(F.data == "back_menu")
 async def back_menu_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await present_bot_screen(callback.message, "Главное меню:", reply_markup=main_menu_keyboard())
     await callback.answer()
 
 
-@dp.callback_query(F.data == "show_prices")
+@client_router.callback_query(F.data == "show_prices")
 async def show_prices_handler(callback: CallbackQuery) -> None:
     await refresh_settings()
     text = (
@@ -1620,7 +1621,7 @@ async def show_prices_handler(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@dp.callback_query(F.data == "show_help")
+@client_router.callback_query(F.data == "show_help")
 async def show_help_handler(callback: CallbackQuery) -> None:
     text = (
         "ℹ️ <b>Помощь</b>\n\n"
@@ -1657,14 +1658,14 @@ async def show_help_handler(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@dp.callback_query(F.data == "show_support")
+@client_router.callback_query(F.data == "show_support")
 async def show_support_handler(callback: CallbackQuery) -> None:
     text = "🆘 <b>Поддержка</b>\n\nПо всем вопросам обращайтесь:\n<code>@AraStarsS_Manager</code>"
     await present_bot_screen(callback.message, text, reply_markup=main_menu_keyboard())
     await callback.answer()
 
 
-@dp.callback_query(F.data == "sell_stars")
+@client_router.callback_query(F.data == "sell_stars")
 async def sell_stars_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     text = (
@@ -1675,7 +1676,7 @@ async def sell_stars_handler(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
 
 
-@dp.callback_query(F.data == "seller_own_bot")
+@client_router.callback_query(F.data == "seller_own_bot")
 async def seller_own_bot_handler(callback: CallbackQuery) -> None:
     text = (
         "🤖 <b>Свой бот</b>\n\n"
@@ -1685,18 +1686,18 @@ async def seller_own_bot_handler(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@dp.callback_query(F.data == "seller_referral")
+@client_router.callback_query(F.data == "seller_referral")
 async def seller_referral_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await ref_system_handler(callback, state)
 
 
-@dp.callback_query(F.data == "seller_sale_access")
+@client_router.callback_query(F.data == "seller_sale_access")
 async def seller_sale_access_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await render_sale_access_message(callback)
 
 
-@dp.callback_query(F.data.startswith("saleplan:"))
+@client_router.callback_query(F.data.startswith("saleplan:"))
 async def sale_plan_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     plan_key = callback.data.split(":", 1)[1]
@@ -1715,7 +1716,7 @@ async def sale_plan_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("salepayment:"))
+@client_router.callback_query(F.data.startswith("salepayment:"))
 async def sale_payment_handler(callback: CallbackQuery) -> None:
     request_id = callback.data.split(":", 1)[1]
     status_code, result = await get_sale_access_request(request_id)
@@ -1727,7 +1728,7 @@ async def sale_payment_handler(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("salepaid:"))
+@client_router.callback_query(F.data.startswith("salepaid:"))
 async def sale_paid_callback(callback: CallbackQuery) -> None:
     request_id = callback.data.split(":", 1)[1]
     status_code, result = await get_sale_access_request(request_id)
@@ -1768,19 +1769,19 @@ async def sale_paid_callback(callback: CallbackQuery) -> None:
     await callback.answer("Передаю заявку на проверку...")
 
 
-@dp.callback_query(F.data == "balance_system")
+@client_router.callback_query(F.data == "balance_system")
 async def balance_system_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await render_balance_profile_message(callback)
 
 
-@dp.callback_query(F.data == "order_history")
+@client_router.callback_query(F.data == "order_history")
 async def order_history_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await render_order_history_message(callback)
 
 
-@dp.callback_query(F.data == "balance_topup")
+@client_router.callback_query(F.data == "balance_topup")
 async def balance_topup_handler(callback: CallbackQuery, state: FSMContext) -> None:
     status_code, result = await get_balance_profile(callback.from_user.id)
     if status_code >= 400:
@@ -1802,13 +1803,13 @@ async def balance_topup_handler(callback: CallbackQuery, state: FSMContext) -> N
     await callback.answer()
 
 
-@dp.callback_query(F.data == "ref_system")
+@client_router.callback_query(F.data == "ref_system")
 async def ref_system_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await render_referral_profile_message(callback)
 
 
-@dp.callback_query(F.data == "ref_levels")
+@client_router.callback_query(F.data == "ref_levels")
 async def ref_levels_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     status_code, result = await get_referral_profile(callback.from_user.id)
@@ -1821,7 +1822,7 @@ async def ref_levels_handler(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
 
 
-@dp.callback_query(F.data == "ref_my_users")
+@client_router.callback_query(F.data == "ref_my_users")
 async def ref_my_users_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     status_code, result = await get_referral_profile(callback.from_user.id)
@@ -1834,7 +1835,7 @@ async def ref_my_users_handler(callback: CallbackQuery, state: FSMContext) -> No
     await callback.answer()
 
 
-@dp.callback_query(F.data == "ref_withdraw")
+@client_router.callback_query(F.data == "ref_withdraw")
 async def ref_withdraw_handler(callback: CallbackQuery, state: FSMContext) -> None:
     status_code, result = await get_referral_profile(callback.from_user.id)
     if status_code >= 400:
@@ -1862,7 +1863,7 @@ async def ref_withdraw_handler(callback: CallbackQuery, state: FSMContext) -> No
     await callback.answer()
 
 
-@dp.callback_query(F.data == "buy_stars")
+@client_router.callback_query(F.data == "buy_stars")
 async def buy_stars_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     text = (
@@ -1876,7 +1877,7 @@ async def buy_stars_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@dp.callback_query(F.data == "buy_self")
+@client_router.callback_query(F.data == "buy_self")
 async def buy_self_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await refresh_settings()
     await state.clear()
@@ -1893,7 +1894,7 @@ async def buy_self_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@dp.callback_query(F.data == "buy_other")
+@client_router.callback_query(F.data == "buy_other")
 async def buy_other_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await refresh_settings()
     await state.clear()
@@ -1910,7 +1911,7 @@ async def buy_other_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@dp.callback_query(F.data == "stars_custom")
+@client_router.callback_query(F.data == "stars_custom")
 async def stars_custom_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(OrderStates.waiting_for_stars)
     await present_order_screen(
@@ -1923,7 +1924,7 @@ async def stars_custom_handler(callback: CallbackQuery, state: FSMContext) -> No
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("starsquick:"))
+@client_router.callback_query(F.data.startswith("starsquick:"))
 async def stars_quick_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await refresh_settings()
     try:
@@ -1961,7 +1962,7 @@ async def stars_quick_handler(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.answer()
 
 
-@dp.callback_query(F.data == "pay_card")
+@client_router.callback_query(F.data == "pay_card")
 async def pay_card_handler(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     recipient_username = str(data.get("recipient_username") or "")
@@ -1974,7 +1975,7 @@ async def pay_card_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@dp.callback_query(F.data == "pay_balance")
+@client_router.callback_query(F.data == "pay_balance")
 async def pay_balance_handler(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     recipient_username = str(data.get("recipient_username") or "")
@@ -1987,7 +1988,7 @@ async def pay_balance_handler(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.answer()
 
 
-@dp.message(OrderStates.waiting_for_stars)
+@client_router.message(OrderStates.waiting_for_stars)
 async def stars_amount_handler(message: Message, state: FSMContext) -> None:
     await refresh_settings()
     raw_value = (message.text or "").strip()
@@ -2071,7 +2072,7 @@ async def stars_amount_handler(message: Message, state: FSMContext) -> None:
     )
 
 
-@dp.message(OrderStates.waiting_for_recipient)
+@client_router.message(OrderStates.waiting_for_recipient)
 async def recipient_handler(message: Message, state: FSMContext) -> None:
     recipient_username = normalize_username(message.text or "")
     if not is_valid_username(recipient_username):
@@ -2123,7 +2124,7 @@ async def recipient_handler(message: Message, state: FSMContext) -> None:
     )
 
 
-@dp.message(OrderStates.waiting_for_withdraw_requisites)
+@client_router.message(OrderStates.waiting_for_withdraw_requisites)
 async def withdraw_requisites_handler(message: Message, state: FSMContext) -> None:
     requisites = (message.text or "").strip()
     if len(requisites) < 5:
@@ -2167,7 +2168,7 @@ async def withdraw_requisites_handler(message: Message, state: FSMContext) -> No
     await state.clear()
 
 
-@dp.message(OrderStates.waiting_for_balance_topup_amount)
+@client_router.message(OrderStates.waiting_for_balance_topup_amount)
 async def balance_topup_amount_handler(message: Message, state: FSMContext) -> None:
     raw_value = (message.text or "").replace(",", ".").strip()
     try:
@@ -2240,7 +2241,7 @@ async def balance_topup_amount_handler(message: Message, state: FSMContext) -> N
     )
 
 
-@dp.callback_query(F.data.startswith("clientpaid:"))
+@client_router.callback_query(F.data.startswith("clientpaid:"))
 async def client_paid_callback(callback: CallbackQuery) -> None:
     await callback.answer("Передаю заказ на проверку...")
     try:
@@ -2268,17 +2269,22 @@ async def client_paid_callback(callback: CallbackQuery) -> None:
         await present_bot_screen(callback.message, "❌ <b>Не удалось отправить платёж на проверку</b>\n\nПопробуйте ещё раз немного позже.")
 
 
-@dp.callback_query()
+@client_router.callback_query()
 async def unknown_callback_handler(callback: CallbackQuery) -> None:
     await callback.answer("Эта кнопка устарела. Нажмите /start", show_alert=True)
 
 
-@dp.message()
+@client_router.message()
 async def fallback_handler(message: Message) -> None:
     try:
         await message.delete()
     except Exception:
         pass
+
+
+# Порядок важен: админ-панель первая, клиентский роутер (с fallback) — последний.
+dp.include_router(admin_panel.router)
+dp.include_router(client_router)
 
 
 async def main() -> None:
