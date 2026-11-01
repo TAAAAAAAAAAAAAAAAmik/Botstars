@@ -9,13 +9,21 @@ import time
 from typing import Any
 
 import requests
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from tonsdk.boc import Cell
 from tonsdk.contract.wallet import Wallets, WalletVersionEnum
 from tonsdk.utils import Address
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(dotenv_path=os.path.join(BASE_DIR, ".env"))
+_ENV_PATH = os.path.join(BASE_DIR, ".env")
+load_dotenv(dotenv_path=_ENV_PATH)
+
+# A key written in .env but left blank (as .env.example ships them) would make
+# os.getenv() return "" instead of the default spelled out at the call site.
+# Treat blank as absent so those defaults apply.
+for _key in dotenv_values(_ENV_PATH) or {}:
+    if not os.environ.get(_key, "").strip():
+        os.environ.pop(_key, None)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
