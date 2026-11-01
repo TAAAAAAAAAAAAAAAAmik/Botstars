@@ -10,6 +10,8 @@
 #   ./deploy.sh --no-systemd    only venv + deps + .env
 #   ./deploy.sh --units-only    only the systemd part (run as root when the
 #                               project owner has no sudo rights)
+#   ./deploy.sh --user          install as user services (systemctl --user),
+#                               no root needed at all
 #   ./deploy.sh --force         skip the "run as project owner" guard
 #
 # Safe to re-run: every step is idempotent. Re-run it after `git pull`.
@@ -21,13 +23,15 @@ cd "$PROJECT_DIR"
 
 SKIP_SYSTEMD=0
 UNITS_ONLY=0
+USER_MODE=0
 FORCE=0
 for arg in "$@"; do
     case "$arg" in
         --no-systemd) SKIP_SYSTEMD=1 ;;
         --units-only) UNITS_ONLY=1 ;;
+        --user)       USER_MODE=1 ;;
         --force)      FORCE=1 ;;
-        -h|--help)    sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help)    sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
         *)            echo "Unknown option: $arg" >&2; exit 2 ;;
     esac
 done
@@ -57,6 +61,42 @@ install_units() {
     done
 
     $SUDO systemctl daemon-reload
+}
+
+install_user_units() {
+    command -v systemctl >/dev/null 2>&1 || die "systemctl not found"
+    systemctl --user show-environment >/dev/null 2>&1 || die \
+"The user systemd manager is not reachable for '$CURRENT_USER'.
+    Without it, user services are not an option — you need root after all,
+    or the cron fallback described in DEPLOY.md."
+
+    local dir="$HOME/.config/systemd/user"
+    mkdir -p "$dir"
+
+    say "Installing user units into $dir"
+    for unit in ara-backend ara-client-bot ara-admin-bot; do
+        [ -f "$PROJECT_DIR/$unit.service" ] || die "missing $unit.service in $PROJECT_DIR"
+        sed -e "s|/home/tamik/botstars|$PROJECT_DIR|g" \
+            -e '/^User=/d' \
+            -e '/^Group=/d' \
+            -e '/^Wants=network-online.target$/d' \
+            -e 's|^After=network-online.target |After=|' \
+            -e '/^After=network-online.target$/d' \
+            -e 's|^WantedBy=multi-user.target|WantedBy=default.target|' \
+            "$PROJECT_DIR/$unit.service" > "$dir/$unit.service"
+        echo "    $dir/$unit.service"
+    done
+
+    systemctl --user daemon-reload
+
+    say "Enabling lingering (so the services survive logout)"
+    if loginctl enable-linger "$CURRENT_USER" 2>/dev/null; then
+        echo "    lingering enabled"
+    else
+        warn "Could not enable lingering — it needs admin rights on this host."
+        warn "The services start now but STOP when your last session closes."
+        warn "Ask for:  loginctl enable-linger $CURRENT_USER"
+    fi
 }
 
 require_root_access() {
@@ -158,13 +198,19 @@ if [ "$SKIP_SYSTEMD" -eq 1 ]; then
 fi
 
 # --------------------------------------------------------------- systemd ----
-require_root_access
-install_units
+if [ "$USER_MODE" -eq 1 ]; then
+    install_user_units
+    SYSTEMCTL=(systemctl --user)
+else
+    require_root_access
+    install_units
+    if [ -n "$SUDO" ]; then SYSTEMCTL=(sudo systemctl); else SYSTEMCTL=(systemctl); fi
+fi
 
 say "Starting services"
-$SUDO systemctl enable --now ara-backend
+"${SYSTEMCTL[@]}" enable --now ara-backend
 sleep 2
-$SUDO systemctl enable --now ara-client-bot ara-admin-bot
+"${SYSTEMCTL[@]}" enable --now ara-client-bot ara-admin-bot
 sleep 2
 
 say "Backend health check"
@@ -175,19 +221,29 @@ else
 fi
 
 say "Status"
-$SUDO systemctl --no-pager --lines=0 status ara-backend ara-client-bot ara-admin-bot || true
+"${SYSTEMCTL[@]}" --no-pager --lines=0 status ara-backend ara-client-bot ara-admin-bot || true
+
+if [ "$USER_MODE" -eq 1 ]; then
+    JCTL="journalctl --user -u"
+    RESTART="systemctl --user restart"
+    AGAIN="./deploy.sh --user"
+else
+    JCTL="journalctl -u"
+    RESTART="sudo systemctl restart"
+    AGAIN="./deploy.sh"
+fi
 
 cat <<INFO
 
 Done. Useful commands:
 
-    journalctl -u ara-backend    -f      backend logs
-    journalctl -u ara-client-bot -f      client bot logs
-    journalctl -u ara-admin-bot  -f      admin bot logs
+    $JCTL ara-backend    -f      backend logs
+    $JCTL ara-client-bot -f      client bot logs
+    $JCTL ara-admin-bot  -f      admin bot logs
 
-    sudo systemctl restart ara-backend ara-client-bot ara-admin-bot
+    $RESTART ara-backend ara-client-bot ara-admin-bot
 
 After updating the code:
 
-    cd $PROJECT_DIR && git pull && ./deploy.sh
+    cd $PROJECT_DIR && git pull && $AGAIN
 INFO

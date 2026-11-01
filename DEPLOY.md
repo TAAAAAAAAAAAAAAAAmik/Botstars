@@ -64,7 +64,7 @@ BACKEND_URL=http://127.0.0.1:8000
 5. Подставляет в `.service`-файлы реальный путь проекта и пользователя-владельца каталога, кладёт их в `/etc/systemd/system/`
 6. Запускает все три сервиса и проверяет `/health`
 
-Флаги: `--no-systemd` (только venv, зависимости и `.env`), `--units-only` (только установка юнитов, см. ниже), `--force` (пропустить проверку владельца каталога).
+Флаги: `--no-systemd` (только venv, зависимости и `.env`), `--units-only` (только установка юнитов, см. ниже), `--user` (поставить как пользовательские сервисы, без root), `--force` (пропустить проверку владельца каталога).
 
 ### Если у пользователя нет прав sudo
 
@@ -81,6 +81,30 @@ systemctl enable --now ara-backend ara-client-bot ara-admin-bot
 ```bash
 usermod -aG sudo tamik      # затем перезайти по SSH
 ```
+
+### Если root недоступен вообще
+
+Тогда сервисы ставятся в пользовательский systemd — root не нужен совсем:
+
+```bash
+./deploy.sh --user
+```
+
+Юниты уезжают в `~/.config/systemd/user/`, управление и логи — с флагом `--user`:
+
+```bash
+systemctl --user status ara-backend ara-client-bot ara-admin-bot
+journalctl --user -u ara-client-bot -f
+systemctl --user restart ara-backend ara-client-bot ara-admin-bot
+```
+
+Одна оговорка: чтобы сервисы продолжали работать после выхода из SSH и поднимались при перезагрузке, нужен lingering. Скрипт пытается включить его сам (`loginctl enable-linger`), но на некоторых хостах это требует прав администратора. Если не вышло — сервисы будут жить только до закрытия последней сессии, и строчку
+
+```bash
+loginctl enable-linger tamik
+```
+
+придётся попросить выполнить того, у кого есть root.
 
 ## Управление
 
