@@ -1,11 +1,14 @@
 [Unit]
-Description=AraStars Admin Bot
-After=network.target
+Description=AraStars Admin Bot (Telegram)
+After=network-online.target ara-backend.service
+Wants=network-online.target
 
 [Service]
-User=root
-WorkingDirectory=/root/AraStars
-ExecStart=/root/AraStars/venv/bin/python admin_bot.py
+Type=simple
+User=tamik
+Group=tamik
+WorkingDirectory=/home/tamik/botstars
+ExecStart=/home/tamik/botstars/venv/bin/python admin_bot.py
 Restart=always
 RestartSec=3
 

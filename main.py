@@ -26,13 +26,15 @@ from fragment_service import (
     search_stars_recipient,
 )
 
-load_dotenv(dotenv_path=".env")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(dotenv_path=os.path.join(BASE_DIR, ".env"))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AraStars Backend")
 
-DB_PATH = os.getenv("ORDERS_DB_PATH", "orders.db").strip() or "orders.db"
+_DEFAULT_DB_PATH = os.path.join(BASE_DIR, "orders.db")
+DB_PATH = os.getenv("ORDERS_DB_PATH", _DEFAULT_DB_PATH).strip() or _DEFAULT_DB_PATH
 REFERRAL_MIN_WITHDRAW = float(os.getenv("REFERRAL_MIN_WITHDRAW", "500").strip() or 500)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN", "").strip()
@@ -41,9 +43,10 @@ BACKEND_ADMIN_TOKEN = os.getenv("BACKEND_ADMIN_TOKEN", ADMIN_BOT_TOKEN).strip()
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@AraStarsS_Manager").strip() or "@AraStarsS_Manager"
 OZON_COOKIES_JSON = os.getenv("OZON_COOKIES_JSON", "").strip()
 OZON_USE_SELENIUM = os.getenv("OZON_USE_SELENIUM", "false").strip().lower() in {"1", "true", "yes", "on"}
+_DEFAULT_OZON_PROFILE_DIR = os.path.join(BASE_DIR, "ozon_chrome_profile")
 OZON_CHROME_PROFILE_DIR = (
-    os.getenv("OZON_CHROME_PROFILE_DIR", "/root/AraStars/ozon_chrome_profile").strip()
-    or "/root/AraStars/ozon_chrome_profile"
+    os.getenv("OZON_CHROME_PROFILE_DIR", _DEFAULT_OZON_PROFILE_DIR).strip()
+    or _DEFAULT_OZON_PROFILE_DIR
 )
 OZON_HEADLESS = os.getenv("OZON_HEADLESS", "true").strip().lower() in {"1", "true", "yes", "on"}
 OZON_CHECK_INTERVAL_SECONDS = int(os.getenv("OZON_CHECK_INTERVAL_SECONDS", "15").strip() or 15)

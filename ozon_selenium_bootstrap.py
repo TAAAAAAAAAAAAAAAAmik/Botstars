@@ -6,7 +6,7 @@ import time
 from http.cookies import SimpleCookie
 
 
-DEFAULT_PROFILE_DIR = "/root/AraStars/ozon_chrome_profile"
+DEFAULT_PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ozon_chrome_profile")
 
 
 def parse_cookie_input(raw: str) -> dict[str, str]:

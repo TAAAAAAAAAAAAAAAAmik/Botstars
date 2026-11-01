@@ -16,7 +16,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path=".env")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(dotenv_path=os.path.join(BASE_DIR, ".env"))
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -24,7 +25,8 @@ ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN", "").strip()
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0").strip() or 0)
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000").strip().rstrip("/")
 BACKEND_ADMIN_TOKEN = os.getenv("BACKEND_ADMIN_TOKEN", ADMIN_BOT_TOKEN).strip()
-ORDERS_DB_PATH = os.getenv("ORDERS_DB_PATH", "orders.db").strip() or "orders.db"
+_DEFAULT_DB_PATH = os.path.join(BASE_DIR, "orders.db")
+ORDERS_DB_PATH = os.getenv("ORDERS_DB_PATH", _DEFAULT_DB_PATH).strip() or _DEFAULT_DB_PATH
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден в .env")

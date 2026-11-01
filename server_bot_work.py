@@ -19,10 +19,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path=".env")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(dotenv_path=os.path.join(BASE_DIR, ".env"))
 logging.basicConfig(level=logging.INFO)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WELCOME_IMAGE_PATH = os.path.join(BASE_DIR, "assets", "welcome.png")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()

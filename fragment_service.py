@@ -14,7 +14,8 @@ from tonsdk.boc import Cell
 from tonsdk.contract.wallet import Wallets, WalletVersionEnum
 from tonsdk.utils import Address
 
-load_dotenv(dotenv_path=".env")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(dotenv_path=os.path.join(BASE_DIR, ".env"))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
