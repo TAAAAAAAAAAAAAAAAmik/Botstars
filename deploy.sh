@@ -8,6 +8,8 @@
 # Usage:
 #   ./deploy.sh                 full install (venv + deps + .env + systemd)
 #   ./deploy.sh --no-systemd    only venv + deps + .env
+#   ./deploy.sh --units-only    only the systemd part (run as root when the
+#                               project owner has no sudo rights)
 #   ./deploy.sh --force         skip the "run as project owner" guard
 #
 # Safe to re-run: every step is idempotent. Re-run it after `git pull`.
@@ -18,10 +20,12 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
 SKIP_SYSTEMD=0
+UNITS_ONLY=0
 FORCE=0
 for arg in "$@"; do
     case "$arg" in
         --no-systemd) SKIP_SYSTEMD=1 ;;
+        --units-only) UNITS_ONLY=1 ;;
         --force)      FORCE=1 ;;
         -h|--help)    sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
         *)            echo "Unknown option: $arg" >&2; exit 2 ;;
@@ -36,13 +40,60 @@ RUN_USER="${RUN_USER:-$(stat -c '%U' "$PROJECT_DIR")}"
 RUN_GROUP="$(id -gn "$RUN_USER" 2>/dev/null || echo "$RUN_USER")"
 CURRENT_USER="$(id -un)"
 
+if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; else SUDO=""; fi
+
+install_units() {
+    command -v systemctl >/dev/null 2>&1 || die "systemctl not found — use --no-systemd"
+
+    say "Installing systemd units (paths -> $PROJECT_DIR, user -> $RUN_USER)"
+    for unit in ara-backend ara-client-bot ara-admin-bot; do
+        [ -f "$PROJECT_DIR/$unit.service" ] || die "missing $unit.service in $PROJECT_DIR"
+        sed -e "s|/home/tamik/botstars|$PROJECT_DIR|g" \
+            -e "s|^User=.*|User=$RUN_USER|" \
+            -e "s|^Group=.*|Group=$RUN_GROUP|" \
+            "$PROJECT_DIR/$unit.service" \
+            | $SUDO tee "/etc/systemd/system/$unit.service" >/dev/null
+        echo "    /etc/systemd/system/$unit.service"
+    done
+
+    $SUDO systemctl daemon-reload
+}
+
+require_root_access() {
+    [ -n "$SUDO" ] || return 0
+    say "Checking sudo access (systemd needs root)"
+    sudo -v && return 0
+    warn "sudo refused: either the password was rejected, or '$CURRENT_USER' has no sudo rights."
+    warn "Check what is allowed with:  sudo -l"
+    cat <<HINT
+
+    Everything except the systemd step is already done.
+    Finish it as root:
+
+        su -
+        $PROJECT_DIR/deploy.sh --units-only
+        systemctl enable --now ara-backend ara-client-bot ara-admin-bot
+
+    Or give this user sudo rights once, as root:
+
+        usermod -aG sudo $RUN_USER      # then log out and back in
+
+HINT
+    die "sudo unavailable"
+}
+
+if [ "$UNITS_ONLY" -eq 1 ]; then
+    install_units
+    say "Units installed. Start them with:"
+    echo "    systemctl enable --now ara-backend ara-client-bot ara-admin-bot"
+    exit 0
+fi
+
 if [ "$CURRENT_USER" != "$RUN_USER" ] && [ "$FORCE" -eq 0 ]; then
     warn "Project directory is owned by '$RUN_USER' but you are '$CURRENT_USER'."
     warn "Creating the venv as the wrong user breaks later 'pip install' runs."
     die  "Run it as the owner:  sudo -u $RUN_USER $PROJECT_DIR/deploy.sh"
 fi
-
-if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; else SUDO=""; fi
 
 # ---------------------------------------------------------------- python ----
 say "Looking for Python 3.11+"
@@ -107,20 +158,8 @@ if [ "$SKIP_SYSTEMD" -eq 1 ]; then
 fi
 
 # --------------------------------------------------------------- systemd ----
-command -v systemctl >/dev/null 2>&1 || die "systemctl not found — use --no-systemd"
-
-say "Installing systemd units (paths -> $PROJECT_DIR, user -> $RUN_USER)"
-for unit in ara-backend ara-client-bot ara-admin-bot; do
-    [ -f "$PROJECT_DIR/$unit.service" ] || die "missing $unit.service in $PROJECT_DIR"
-    sed -e "s|/home/tamik/botstars|$PROJECT_DIR|g" \
-        -e "s|^User=.*|User=$RUN_USER|" \
-        -e "s|^Group=.*|Group=$RUN_GROUP|" \
-        "$PROJECT_DIR/$unit.service" \
-        | $SUDO tee "/etc/systemd/system/$unit.service" >/dev/null
-    echo "    /etc/systemd/system/$unit.service"
-done
-
-$SUDO systemctl daemon-reload
+require_root_access
+install_units
 
 say "Starting services"
 $SUDO systemctl enable --now ara-backend

@@ -64,7 +64,23 @@ BACKEND_URL=http://127.0.0.1:8000
 5. Подставляет в `.service`-файлы реальный путь проекта и пользователя-владельца каталога, кладёт их в `/etc/systemd/system/`
 6. Запускает все три сервиса и проверяет `/health`
 
-Флаги: `--no-systemd` (только venv, зависимости и `.env`), `--force` (пропустить проверку владельца каталога).
+Флаги: `--no-systemd` (только venv, зависимости и `.env`), `--units-only` (только установка юнитов, см. ниже), `--force` (пропустить проверку владельца каталога).
+
+### Если у пользователя нет прав sudo
+
+Шаг с systemd требует root. Если `sudo` отказывает (`sudo -l` покажет, что разрешено), всё остальное уже сделано — остаётся доставить юниты от root:
+
+```bash
+su -
+/home/tamik/botstars/deploy.sh --units-only
+systemctl enable --now ara-backend ara-client-bot ara-admin-bot
+```
+
+Либо один раз выдать права и больше к этому не возвращаться — от root:
+
+```bash
+usermod -aG sudo tamik      # затем перезайти по SSH
+```
 
 ## Управление
 
@@ -127,5 +143,6 @@ OZON_HEADLESS=true
 | `TelegramConflictError` / 409 | один токен опрашивают два процесса. Проверить: `ps aux \| grep -E 'bot\.py\|server_bot_work' \| grep -v grep` |
 | Бот отвечает, но заказы не создаются | не поднят бэкенд или неверный `BACKEND_URL` |
 | Пустая история заказов после переезда | `orders.db` лежит в `.gitignore` и не переносится через git — копировать вручную |
+| `sudo: ... can't do that` на шаге systemd | пароль не принят или нет прав sudo — см. раздел про `--units-only` |
 
 Бэкап базы перед обновлением: `cp orders.db orders.db.$(date +%F).bak`
