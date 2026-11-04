@@ -2239,8 +2239,8 @@ LEGAL_DOCUMENTS: dict[str, tuple[str, str]] = {
 }
 
 LEGAL_TOKENS: dict[str, str] = {
-    "{{SELLER_NAME}}": "name",
-    "{{SELLER_INN}}": "inn",
+    "{{SELLER_LINE}}": "seller_line",
+    "{{REQUISITES}}": "requisites",
     "{{SELLER_EMAIL}}": "email",
     "{{SUPPORT_TG}}": "support",
     "{{DOC_DATE}}": "date",
@@ -2253,10 +2253,42 @@ LEGAL_CHUNK_LIMIT = 3800
 _legal_cache: dict[str, tuple[float, list[str]]] = {}
 
 
+def legal_seller_line() -> str:
+    """Как Исполнитель называет себя в тексте документов.
+
+    ФИО и ИНН подставляются, только если заданы в .env. Без них остаётся
+    нейтральная формулировка — никаких «не указано» в тексте договора.
+    """
+    parts: list[str] = []
+    if LEGAL_SELLER_NAME:
+        parts.append(LEGAL_SELLER_NAME)
+    if LEGAL_SELLER_INN:
+        parts.append(f"ИНН {LEGAL_SELLER_INN}")
+    if not parts:
+        # Нейтральная форма: подставляется в «Исполнитель: …», «Владелец
+        # Сервиса — …» и «Оператор персональных данных: …» без тавтологии.
+        return "лицо, применяющее специальный налоговый режим «Налог на профессиональный доход» (самозанятый)"
+    parts.append("применяющий специальный налоговый режим «Налог на профессиональный доход»")
+    return ", ".join(parts)
+
+
+def legal_requisites_lines() -> list[str]:
+    lines: list[str] = []
+    if LEGAL_SELLER_NAME:
+        lines.append(f"<b>Исполнитель:</b> {LEGAL_SELLER_NAME}")
+    if LEGAL_SELLER_INN:
+        lines.append(f"<b>ИНН:</b> <code>{LEGAL_SELLER_INN}</code>")
+    lines.append("<b>Налоговый статус:</b> плательщик налога на профессиональный доход (самозанятый)")
+    if LEGAL_SELLER_EMAIL:
+        lines.append(f"<b>Почта:</b> {LEGAL_SELLER_EMAIL}")
+    lines.append(f"<b>Поддержка:</b> {SUPPORT_USERNAME}")
+    return lines
+
+
 def legal_values() -> dict[str, str]:
     return {
-        "name": LEGAL_SELLER_NAME or "не указано",
-        "inn": LEGAL_SELLER_INN or "не указан",
+        "seller_line": legal_seller_line(),
+        "requisites": "\n".join(legal_requisites_lines()),
         "email": LEGAL_SELLER_EMAIL or SUPPORT_USERNAME,
         "support": SUPPORT_USERNAME,
         "date": LEGAL_DOC_DATE or "—",
@@ -2308,15 +2340,12 @@ def load_legal_document(key: str) -> list[str]:
 
 
 def legal_requisites_text() -> str:
-    values = legal_values()
+    body = "\n".join(legal_requisites_lines())
+    date = LEGAL_DOC_DATE or "—"
     return (
         "🏷 <b>Реквизиты и контакты</b>\n\n"
-        f"<b>Исполнитель:</b> {values['name']}\n"
-        "<b>Налоговый статус:</b> плательщик налога на профессиональный доход (самозанятый)\n"
-        f"<b>ИНН:</b> <code>{values['inn']}</code>\n"
-        f"<b>Почта:</b> {values['email']}\n"
-        f"<b>Поддержка:</b> {values['support']}\n\n"
-        f"<i>Документы приведены в редакции от {values['date']}</i>"
+        f"{body}\n\n"
+        f"<i>Документы приведены в редакции от {date}</i>"
     )
 
 
