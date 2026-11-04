@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AraStars — покупка Telegram Stars</title>
+<meta name="description" content="AraStars — сервис покупки Telegram Stars через Telegram-бот. Тарифы, порядок оказания услуги, оферта и контакты.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site">
+    <div class="wrap">
+        <a class="brand" href="index.html">⭐ AraStars</a>
+        <nav>
+            <a href="#tariffs">Тарифы</a>
+            <a href="#how">Как это работает</a>
+            <a href="offer.html">Оферта</a>
+            <a href="#contacts">Контакты</a>
+        </nav>
+    </div>
+</header>
+
+<main class="wrap">
+
+    <h1>Покупка Telegram Stars</h1>
+    <p class="lead">
+        AraStars — сервис пополнения Telegram Stars на любой аккаунт Telegram.
+        Заказ оформляется в Telegram-боте, звёзды зачисляются автоматически после подтверждения оплаты.
+    </p>
+
+    <p><a class="cta" href="{{BOT_URL}}">Открыть бот в Telegram</a></p>
+
+    <h2 id="how">Как это работает</h2>
+    <ol>
+        <li>Вы открываете Telegram-бот AraStars и выбираете количество звёзд (минимум — 50).</li>
+        <li>Указываете получателя: свой аккаунт или @username любого другого пользователя Telegram.</li>
+        <li>Оплачиваете заказ одним из доступных способов.</li>
+        <li>После подтверждения оплаты сервис зачисляет звёзды на указанный аккаунт и присылает уведомление в бот.</li>
+    </ol>
+    <p class="meta">
+        Обычный срок зачисления — до 15 минут с момента подтверждения оплаты.
+        Максимальный срок, в течение которого услуга должна быть оказана, — 24 часа (п. 5 <a href="offer.html">оферты</a>).
+    </p>
+
+    <h2 id="tariffs">Тарифы</h2>
+    <p>Стоимость зависит от количества звёзд в заказе. Цена фиксируется в момент оформления заказа.</p>
+
+    <table>
+        <thead>
+            <tr><th>Количество звёзд</th><th>Цена за звезду</th></tr>
+        </thead>
+        <tbody>
+            <tr><td>от 50 до 99</td><td>1,50&nbsp;₽</td></tr>
+            <tr><td>от 100 до 4&nbsp;999</td><td>1,32&nbsp;₽</td></tr>
+            <tr><td>от 5&nbsp;000</td><td>1,24&nbsp;₽</td></tr>
+        </tbody>
+    </table>
+
+    <p class="meta">
+        Минимальный заказ — 50 звёзд. Итоговая сумма к оплате отображается в боте до оплаты.
+        Дополнительные комиссии сверх указанной суммы сервис не взимает.
+    </p>
+
+    <div class="card">
+        <h3>Выкуп звёзд</h3>
+        <p>
+            Сервис также выкупает Telegram Stars у пользователей по цене <strong>1,20&nbsp;₽</strong> за звезду.
+            Выкуп доступен после подтверждения заявки оператором сервиса.
+        </p>
+    </div>
+
+    <div class="card">
+        <h3>Реферальная программа</h3>
+        <p>
+            За приглашённых пользователей начисляется вознаграждение на внутренний баланс.
+            Вывод вознаграждения доступен при накоплении от <strong>500&nbsp;₽</strong>.
+            Условия начисления и вывода описаны в <a href="terms.html">пользовательском соглашении</a>.
+        </p>
+    </div>
+
+    <h2>Оплата</h2>
+    <p>
+        Оплата производится в рублях Российской Федерации способами, доступными в боте на момент оформления заказа.
+        Платёж считается подтверждённым после поступления средств исполнителю.
+    </p>
+    <p>
+        Исполнитель применяет налог на профессиональный доход. Чек формируется в приложении
+        «Мой налог» и направляется заказчику в Telegram-бот после оплаты.
+    </p>
+
+    <h2>Возврат средств</h2>
+    <p>
+        Если услуга не оказана — звёзды не зачислены получателю — уплаченная сумма возвращается в полном объёме.
+        Порядок и сроки описаны в разделе <a href="refund.html">«Возврат средств»</a>.
+    </p>
+
+    <h2 id="contacts">Контакты и реквизиты</h2>
+    <div class="card">
+        <dl class="req">
+            <dt>Исполнитель</dt>
+            <dd><span class="fill">{{SELLER_NAME}}</span></dd>
+
+            <dt>Налоговый статус</dt>
+            <dd>Плательщик налога на профессиональный доход (самозанятый)</dd>
+
+            <dt>ИНН</dt>
+            <dd><span class="fill">{{SELLER_INN}}</span></dd>
+
+            <dt>Электронная почта</dt>
+            <dd><a href="mailto:{{SELLER_EMAIL}}">{{SELLER_EMAIL}}</a></dd>
+
+            <dt>Поддержка в Telegram</dt>
+            <dd><a href="https://t.me/{{SUPPORT_TG_PLAIN}}">{{SUPPORT_TG}}</a></dd>
+
+            <dt>Сайт</dt>
+            <dd><a href="{{SITE_URL}}">{{SITE_URL}}</a></dd>
+        </dl>
+    </div>
+
+</main>
+
+<footer class="site">
+    <div class="wrap">
+        <div class="links">
+            <a href="offer.html">Публичная оферта</a>
+            <a href="terms.html">Пользовательское соглашение</a>
+            <a href="privacy.html">Обработка персональных данных</a>
+            <a href="refund.html">Возврат средств</a>
+        </div>
+        <div>
+            AraStars · <span class="fill">{{SELLER_NAME}}</span> · ИНН <span class="fill">{{SELLER_INN}}</span><br>
+            Сервис не является официальным продуктом Telegram FZ-LLC и не аффилирован с ним.
+        </div>
+    </div>
+</footer>
+
+</body>
+</html>

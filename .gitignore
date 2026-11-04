@@ -13,3 +13,6 @@ help_telegraph_bad_check.json
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Личные данные (сам сайт в docs/ публикуется и коммитится)
+site/config.env
