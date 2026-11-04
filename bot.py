@@ -51,6 +51,12 @@ WELCOME_PHOTO_FILE_ID_PATH = (
 )
 HELP_TELEGRAPH_URL = os.getenv("HELP_TELEGRAPH_URL", "https://telegra.ph/AraStars-05-12").strip() or "https://telegra.ph/AraStars-05-12"
 
+LEGAL_DIR = os.path.join(BASE_DIR, "legal")
+LEGAL_SELLER_NAME = os.getenv("LEGAL_SELLER_NAME", "").strip()
+LEGAL_SELLER_INN = os.getenv("LEGAL_SELLER_INN", "").strip()
+LEGAL_SELLER_EMAIL = os.getenv("LEGAL_SELLER_EMAIL", "").strip()
+LEGAL_DOC_DATE = os.getenv("LEGAL_DOC_DATE", "").strip()
+
 PRICE_50_99 = os.getenv("PRICE_50_99", "1.50").strip()
 PRICE_100_4999 = os.getenv("PRICE_100_4999", "1.32").strip()
 PRICE_5000_PLUS = os.getenv("PRICE_5000_PLUS", "1.24").strip()
@@ -2221,6 +2227,163 @@ async def client_paid_callback(callback: CallbackQuery) -> None:
     except Exception:
         logging.exception("Ошибка при отправке на проверку")
         await present_bot_screen(callback.message, "❌ <b>Не удалось отправить платёж на проверку</b>\n\nПопробуйте ещё раз немного позже.")
+
+
+# ------------------------------------------------------------- Документы ----
+
+LEGAL_DOCUMENTS: dict[str, tuple[str, str]] = {
+    "terms": ("📄 Пользовательское соглашение", "terms.txt"),
+    "offer": ("📝 Договор оферты", "offer.txt"),
+    "privacy": ("🔐 Обработка персональных данных", "privacy.txt"),
+    "refund": ("💸 Возврат средств", "refund.txt"),
+}
+
+LEGAL_TOKENS: dict[str, str] = {
+    "{{SELLER_NAME}}": "name",
+    "{{SELLER_INN}}": "inn",
+    "{{SELLER_EMAIL}}": "email",
+    "{{SUPPORT_TG}}": "support",
+    "{{DOC_DATE}}": "date",
+}
+
+# Предел Telegram — 4096 символов; берём с запасом на разметку.
+LEGAL_CHUNK_LIMIT = 3800
+
+# key -> (mtime файла, готовые куски). Правка .txt подхватывается без рестарта.
+_legal_cache: dict[str, tuple[float, list[str]]] = {}
+
+
+def legal_values() -> dict[str, str]:
+    return {
+        "name": LEGAL_SELLER_NAME or "не указано",
+        "inn": LEGAL_SELLER_INN or "не указан",
+        "email": LEGAL_SELLER_EMAIL or SUPPORT_USERNAME,
+        "support": SUPPORT_USERNAME,
+        "date": LEGAL_DOC_DATE or "—",
+    }
+
+
+def split_for_telegram(text: str, limit: int = LEGAL_CHUNK_LIMIT) -> list[str]:
+    chunks: list[str] = []
+    current = ""
+    for block in text.split("\n\n"):
+        candidate = f"{current}\n\n{block}" if current else block
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        while len(block) > limit:
+            cut = block.rfind("\n", 0, limit)
+            if cut <= 0:
+                cut = limit
+            chunks.append(block[:cut].strip())
+            block = block[cut:].lstrip("\n")
+        current = block
+    if current.strip():
+        chunks.append(current)
+    return chunks or ["Документ пуст."]
+
+
+def load_legal_document(key: str) -> list[str]:
+    _, filename = LEGAL_DOCUMENTS[key]
+    path = os.path.join(LEGAL_DIR, filename)
+    stamp = os.path.getmtime(path)
+
+    cached = _legal_cache.get(key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+
+    values = legal_values()
+    for token, field in LEGAL_TOKENS.items():
+        text = text.replace(token, values[field])
+
+    chunks = split_for_telegram(text.strip())
+    _legal_cache[key] = (stamp, chunks)
+    return chunks
+
+
+def legal_requisites_text() -> str:
+    values = legal_values()
+    return (
+        "🏷 <b>Реквизиты и контакты</b>\n\n"
+        f"<b>Исполнитель:</b> {values['name']}\n"
+        "<b>Налоговый статус:</b> плательщик налога на профессиональный доход (самозанятый)\n"
+        f"<b>ИНН:</b> <code>{values['inn']}</code>\n"
+        f"<b>Почта:</b> {values['email']}\n"
+        f"<b>Поддержка:</b> {values['support']}\n\n"
+        f"<i>Документы приведены в редакции от {values['date']}</i>"
+    )
+
+
+def legal_menu_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=title, callback_data=f"legal:{key}")]
+        for key, (title, _) in LEGAL_DOCUMENTS.items()
+    ]
+    rows.append([InlineKeyboardButton(text="🏷 Реквизиты и контакты", callback_data="legal:requisites")])
+    rows.append([InlineKeyboardButton(text="⬅️ В главное меню", callback_data="back_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+LEGAL_MENU_TEXT = (
+    "📑 <b>Документы сервиса</b>\n\n"
+    "Оформляя заказ, вы принимаете условия этих документов.\n"
+    "Выберите, что открыть:"
+)
+
+
+@dp.message(Command("police", "policy", "docs"))
+async def legal_command_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        LEGAL_MENU_TEXT,
+        reply_markup=legal_menu_keyboard(),
+        disable_web_page_preview=True,
+    )
+
+
+@dp.callback_query(F.data == "legal_menu")
+async def legal_menu_handler(callback: CallbackQuery) -> None:
+    await present_bot_screen(callback.message, LEGAL_MENU_TEXT, reply_markup=legal_menu_keyboard())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("legal:"))
+async def legal_document_handler(callback: CallbackQuery) -> None:
+    key = (callback.data or "").split(":", 1)[1]
+
+    if key == "requisites":
+        await callback.answer()
+        await callback.message.answer(
+            legal_requisites_text(),
+            reply_markup=legal_menu_keyboard(),
+            disable_web_page_preview=True,
+        )
+        return
+
+    if key not in LEGAL_DOCUMENTS:
+        await callback.answer("Документ не найден", show_alert=True)
+        return
+
+    try:
+        chunks = load_legal_document(key)
+    except OSError:
+        logging.exception("Не удалось прочитать документ %s", key)
+        await callback.answer("Документ временно недоступен", show_alert=True)
+        return
+
+    await callback.answer()
+    for index, chunk in enumerate(chunks):
+        await callback.message.answer(
+            chunk,
+            reply_markup=legal_menu_keyboard() if index == len(chunks) - 1 else None,
+            disable_web_page_preview=True,
+        )
 
 
 @dp.callback_query()
