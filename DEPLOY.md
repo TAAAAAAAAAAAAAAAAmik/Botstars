@@ -122,6 +122,66 @@ sudo systemctl restart ara-backend ara-client-bot ara-admin-bot
 curl http://127.0.0.1:8000/health
 ```
 
+## Перенос на другой сервер
+
+Код целиком приезжает из git, поэтому весь функционал переносится сам. А вот состояние — нет:
+`orders.db` и `.env` в `.gitignore` и в репозиторий не попадают.
+
+Без копирования `orders.db` теряются:
+
+- история заказов,
+- внутренние балансы пользователей,
+- реферальные связи и накопленные вознаграждения,
+- заявки на вывод и на доступ к продаже,
+- настройки, изменённые через админ-бота (таблица `settings` перекрывает значения из `.env`).
+
+Посмотреть, есть ли что терять, на старом сервере:
+
+```bash
+cd ~/botstars && ./venv/bin/python -c "
+import sqlite3
+c = sqlite3.connect('orders.db')
+for t in ('users','orders','referral_transactions','balance_transactions','withdrawal_requests','settings'):
+    try:
+        print(f'{t:24} {c.execute(f\"select count(*) from {t}\").fetchone()[0]}')
+    except Exception as exc:
+        print(f'{t:24} — {exc}')
+"
+```
+
+### Порядок переезда
+
+Важно: **сначала гасим старого бота**. Если оба процесса будут опрашивать один `BOT_TOKEN`,
+Telegram ответит ошибкой 409 Conflict и работать не будет ни один.
+
+```bash
+# 1. На СТАРОМ сервере — остановить и отдать данные
+systemctl --user stop ara-backend ara-client-bot ara-admin-bot
+scp ~/botstars/.env ~/botstars/orders.db root@НОВЫЙ_IP:/tmp/
+
+# 2. На НОВОМ сервере, под root — подготовка
+apt update && apt install -y python3 python3-venv git
+adduser bot && usermod -aG sudo bot
+
+# 3. Под пользователем bot — развернуть
+su - bot
+git clone -b <ветка> <репозиторий> ~/botstars
+sudo mv /tmp/.env /tmp/orders.db ~/botstars/
+sudo chown bot:bot ~/botstars/.env ~/botstars/orders.db
+chmod 600 ~/botstars/.env
+cd ~/botstars && ./deploy.sh
+
+# 4. Проверить
+systemctl status ara-backend ara-client-bot ara-admin-bot --no-pager
+curl -s http://127.0.0.1:8000/health; echo
+```
+
+Ставить от root в `/root/botstars` тоже можно — `deploy.sh` подставит `User=root`, — но держать
+бота под отдельным пользователем безопаснее, и юниты рассчитаны именно на это.
+
+Старый сервер не удаляйте, пока новый не отработает пару дней: `orders.db` оттуда — единственная
+копия данных.
+
 ## Обновление
 
 ```bash
