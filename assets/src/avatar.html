@@ -3,10 +3,9 @@
 <!--
   Круглая аватарка AraStars, 768x768.
 
-  Звезда — исходные пиксели ../welcome.png в масштабе 1:1 (без ресэмплинга),
-  сдвинутые так, чтобы центр звезды попал в центр квадрата. Слева закрыт
-  остаток старого заголовка, справа фон продолжен градиентом: у исходника
-  там почти чёрный однородный край (разброс ~1%), стык не виден.
+  Собрана из ../welcome.png: логотип и звезда — исходные пиксели.
+  Убрано всё, что в круге не читается: заголовок, плашка с ником,
+  подпись, разделитель.
 
   Пересборка:
     cd assets/src
@@ -18,27 +17,43 @@
 
   .av { position:relative; width:768px; height:768px; overflow:hidden;
         background:
-          radial-gradient(520px 520px at 50% 46%, #10294f 0%, rgba(10,22,44,0) 70%),
+          radial-gradient(540px 540px at 50% 56%, #10294f 0%, rgba(10,22,44,0) 72%),
           linear-gradient(150deg,#01030c 0%,#02060f 55%,#040a1c 100%);
         background-color:#01030c }
 
-  /* исходник 1:1; исходник увеличен в 1.06; центр звезды (1116,594) -> центр холста (384,384) */
-  .src { position:absolute; left:-799px; top:-246px; width:1535px; height:1151px }
+  /* исходник целиком, масштаб 0.78; центр звезды (1114,594) -> (384,500) */
+  .src { position:absolute; left:-485px; top:37px; width:1129px; height:847px }
 
-  /* затемнение по краю: прячет мелочь у границы круга и собирает взгляд на звезде */
+  /* хвост старого заголовка: исходник до x=838 -> холст до 169;
+     левый луч звезды начинается с 179, поэтому край держим на 174 */
+  .patch { position:absolute; left:0; top:0; width:174px; height:768px;
+           background:linear-gradient(180deg,#01030c,#02050e 60%,#03081a);
+           -webkit-mask-image:linear-gradient(to right,#000 170px,transparent 174px);
+                   mask-image:linear-gradient(to right,#000 170px,transparent 174px) }
+
+  /* логотип: берём область с запасом (x 55..495, y 95..310), масштаб 0.75,
+     края растушёваны на 20px — иначе вырез виден прямоугольником */
+  .logo { position:absolute; left:220px; top:83px; width:330px; height:161px;
+          background-image:url(../welcome.png);
+          background-size:1086px auto;
+          background-position:-41px -71px;
+          -webkit-mask-image:
+            linear-gradient(to right, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%),
+            linear-gradient(to bottom, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%);
+          -webkit-mask-composite:source-in;
+                  mask-image:
+            linear-gradient(to right, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%),
+            linear-gradient(to bottom, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%);
+                  mask-composite:intersect }
+
   .vignette { position:absolute; inset:0; pointer-events:none;
               background:radial-gradient(circle at 50% 50%,
-                 rgba(1,3,12,0) 52%, rgba(1,3,12,.45) 78%,
-                 rgba(1,3,12,.82) 93%, rgba(1,3,12,.95) 100%) }
-
-  /* закрывает хвост старого заголовка (исходник до x=846 -> холст до 127) */
-  .patch { position:absolute; left:0; top:0; width:112px; height:768px;
-           background:linear-gradient(180deg,#01030c,#02050e 60%,#03081a);
-           -webkit-mask-image:linear-gradient(to right,#000 92px,transparent 112px);
-                   mask-image:linear-gradient(to right,#000 92px,transparent 112px) }
+                 rgba(1,3,12,0) 54%, rgba(1,3,12,.42) 79%,
+                 rgba(1,3,12,.8) 93%, rgba(1,3,12,.95) 100%) }
 </style></head>
 <body><div class="av">
   <img class="src" src="../welcome.png" alt="">
   <div class="patch"></div>
+  <div class="logo"></div>
   <div class="vignette"></div>
 </div></body></html>
