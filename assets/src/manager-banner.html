@@ -1,63 +1,65 @@
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8">
+<!--
+  Баннер поддержки AraStars.
+
+  Строится ПОВЕРХ ../welcome.png: вся правая часть (звезда, диск, постамент,
+  малые звёзды, блики) и логотип остаются исходными пикселями. Закрывается
+  только блок старого текста слева — до x=844, где начинается тёмный диск.
+
+  Пересборка:
+    cd assets/src
+    npx playwright screenshot --viewport-size=1448,1086 \
+        manager-banner.html ../manager.png
+-->
 <style>
   * { margin:0; padding:0; box-sizing:border-box }
   body { width:1448px; height:1086px; overflow:hidden;
-         font-family:'Inter Display','Inter',sans-serif; background:#05070d }
-  .stage { position:relative; width:1448px; height:1086px; overflow:hidden;
-            background-color:#060a14;
-            background-image:
-              radial-gradient(820px 680px at 76% 56%, rgba(21,66,138,.72) 0%, rgba(18,58,122,0) 64%),
-              radial-gradient(640px 560px at 10% 16%, rgba(14,28,56,.9) 0%, rgba(13,26,51,0) 72%),
-              linear-gradient(145deg,#05070d 0%,#070d1b 46%,#0a1832 74%,#0d2342 100%); }
-  .streak { position:absolute; top:-260px; width:140px; height:1760px;
-             background:linear-gradient(180deg, rgba(96,156,255,.085), rgba(96,156,255,0));
-             transform:rotate(21deg); filter:blur(3px) }
-  .logo { position:absolute; left:96px; top:80px; display:flex; align-items:center; gap:18px }
-  .logo .ara { font-size:60px; font-weight:800; color:#fff; letter-spacing:.02em; line-height:.9 }
-  .logo .st  { font-size:48px; font-weight:800; color:#2b7fff; letter-spacing:.10em; line-height:.95 }
-  .left { position:absolute; left:96px; top:336px; width:700px }
-  h1 { font-size:96px; font-weight:800; line-height:1.0; color:#fff;
-        letter-spacing:-.015em; text-shadow:0 8px 44px rgba(0,0,0,.65) }
-  h1 .accent { color:#2b7fff }
-  .rule { display:flex; align-items:center; gap:14px; margin:40px 0 28px; width:430px }
-  .rule i { flex:1; height:2px; background:linear-gradient(90deg,#2b7fff,rgba(43,127,255,0)) }
-  .rule i.r { background:linear-gradient(270deg,#2b7fff,rgba(43,127,255,0)) }
+         font-family:'Inter Display','Inter',sans-serif }
+
+  .stage { position:relative; width:1448px; height:1086px; overflow:hidden }
+
+  /* оригинал как основа — ничего в нём не перерисовывается */
+  .base { position:absolute; inset:0; width:1448px; height:1086px; display:block }
+
+  /* заплатка на месте старого заголовка; цвет снят пипеткой с соседнего фона */
+  .patch {
+    position:absolute; left:0; top:270px; width:844px; height:646px;
+    background:linear-gradient(158deg,#030308 0%,#03060f 42%,#040a1d 74%,#050e26 100%);
+    -webkit-mask-image:linear-gradient(to bottom,
+        transparent 0, #000 18px, #000 calc(100% - 30px), transparent 100%);
+            mask-image:linear-gradient(to bottom,
+        transparent 0, #000 18px, #000 calc(100% - 30px), transparent 100%);
+  }
+
+  .left { position:absolute; left:104px; top:352px; width:760px }
+  h1 { font-size:98px; font-weight:800; line-height:1.0; color:#fff;
+       letter-spacing:-.015em; text-shadow:0 8px 44px rgba(0,0,0,.7) }
+  h1 .accent { color:#0f6fe8 }
+
+  .rule { display:flex; align-items:center; gap:14px; margin:42px 0 30px; width:430px }
+  .rule i { flex:1; height:2px; background:linear-gradient(90deg,#0f6fe8,rgba(15,111,232,0)) }
+  .rule i.r { background:linear-gradient(270deg,#0f6fe8,rgba(15,111,232,0)) }
+
   .handle { display:inline-flex; padding:21px 38px; border-radius:20px;
-             background:rgba(43,127,255,.13); border:2px solid rgba(43,127,255,.48);
-             box-shadow:inset 0 0 70px rgba(43,127,255,.16), 0 10px 40px rgba(0,0,0,.35) }
-  .handle span { font-size:44px; font-weight:800; color:#fff }
-  .sub { margin-top:32px; font-size:32px; color:#93a6c2; line-height:1.45 }
-  .sub b { color:#2b7fff; font-weight:600 }
-  .halo { position:absolute; right:189px; top:286px; width:548px; height:548px;
-            border-radius:50%;
-            background:radial-gradient(circle at 42% 38%,
-                        rgba(28,78,156,.62) 0%, rgba(16,44,92,.42) 55%,
-                        rgba(10,24,48,0) 72%);
-            box-shadow:inset 0 0 120px rgba(6,14,30,.75) }
-  .art  { position:absolute; right:40px; top:150px; height:800px; object-fit:contain }
+            background:rgba(15,111,232,.14); border:2px solid rgba(15,111,232,.5);
+            box-shadow:inset 0 0 70px rgba(15,111,232,.17), 0 10px 40px rgba(0,0,0,.4) }
+  .handle span { font-size:43px; font-weight:800; color:#fff }
+
+  .sub { margin-top:32px; font-size:31px; color:#93a6c2; line-height:1.45 }
+  .sub b { color:#0f6fe8; font-weight:600 }
 </style></head>
 <body><div class="stage">
 
-  <div class="streak" style="left:1095px"></div>
-  <div class="streak" style="left:1268px; width:84px; opacity:.65"></div>
-
-  <div class="halo"></div>
-  <img class="art" src="star.png" alt="">
-
-  <div class="logo">
-    <div>
-      <div class="ara">ARA</div><div class="st">STARS</div>
-    </div>
-    <svg width="100" height="100" viewBox="-56 -56 112 112">
-      <path d="M 0.0,-46.0 L 11.8,-16.2 L 43.7,-14.2 L 19.0,6.2 L 27.0,37.2 L 0.0,20.0 L -27.0,37.2 L -19.0,6.2 L -43.7,-14.2 L -11.8,-16.2 Z" fill="none" stroke="#2b7fff" stroke-width="9" stroke-linejoin="round"/>
-    </svg>
-  </div>
+  <img class="base" src="../welcome.png" alt="">
+  <div class="patch"></div>
 
   <div class="left">
     <h1>СЛУЖБА<br><span class="accent">ПОДДЕРЖКИ</span></h1>
     <div class="rule"><i></i>
-      <svg width="26" height="26" viewBox="-15 -15 30 30"><path d="M 0.0,-13.0 L 3.3,-4.5 L 12.4,-4.0 L 5.3,1.7 L 7.6,10.5 L 0.0,5.6 L -7.6,10.5 L -5.3,1.7 L -12.4,-4.0 L -3.3,-4.5 Z" fill="#2b7fff"/></svg>
+      <svg width="26" height="26" viewBox="-15 -15 30 30">
+        <path d="M 0.0,-13.0 L 3.3,-4.5 L 12.4,-4.0 L 5.3,1.7 L 7.6,10.5 L 0.0,5.6 L -7.6,10.5 L -5.3,1.7 L -12.4,-4.0 L -3.3,-4.5 Z" fill="#0f6fe8"/>
+      </svg>
       <i class="r"></i></div>
     <div class="handle"><span>@AraStarsS_Manager</span></div>
     <div class="sub">Вопросы по заказу, оплате и выводу —<br>пишите, отвечаем <b>быстро</b></div>
