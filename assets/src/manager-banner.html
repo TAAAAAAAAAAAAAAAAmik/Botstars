@@ -1,0 +1,114 @@
+<!--
+  Баннер службы поддержки AraStars — исходник для assets/manager.png
+
+  Пересобрать после правки текста (нужен node с playwright):
+      npx playwright screenshot --viewport-size=1448,1086 \
+          assets/src/manager-banner.html assets/manager.png
+
+  Размер 1448x1086 выбран под welcome.png, чтобы оба баннера
+  одинаково смотрелись в Telegram.
+-->
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box }
+  body { width:1448px; height:1086px; overflow:hidden;
+         font-family:'Inter Display','Inter',sans-serif; background:#05070d }
+  .stage { position:relative; width:1448px; height:1086px; overflow:hidden;
+            background-color:#060a14;
+            background-image:
+              radial-gradient(820px 680px at 76% 56%, rgba(21,66,138,.72) 0%, rgba(18,58,122,0) 64%),
+              radial-gradient(640px 560px at 10% 16%, rgba(14,28,56,.9) 0%, rgba(13,26,51,0) 72%),
+              linear-gradient(145deg,#05070d 0%,#070d1b 46%,#0a1832 74%,#0d2342 100%); }
+  .streak { position:absolute; top:-260px; width:140px; height:1760px;
+             background:linear-gradient(180deg, rgba(96,156,255,.085), rgba(96,156,255,0));
+             transform:rotate(21deg); filter:blur(3px) }
+  .logo { position:absolute; left:96px; top:80px; display:flex; align-items:center; gap:18px }
+  .logo .ara { font-size:60px; font-weight:800; color:#fff; letter-spacing:.02em; line-height:.9 }
+  .logo .st  { font-size:48px; font-weight:800; color:#2b7fff; letter-spacing:.10em; line-height:.95 }
+  .left { position:absolute; left:96px; top:336px; width:700px }
+  h1 { font-size:96px; font-weight:800; line-height:1.0; color:#fff;
+        letter-spacing:-.015em; text-shadow:0 8px 44px rgba(0,0,0,.65) }
+  h1 .accent { color:#2b7fff }
+  .rule { display:flex; align-items:center; gap:14px; margin:40px 0 28px; width:430px }
+  .rule i { flex:1; height:2px; background:linear-gradient(90deg,#2b7fff,rgba(43,127,255,0)) }
+  .rule i.r { background:linear-gradient(270deg,#2b7fff,rgba(43,127,255,0)) }
+  .handle { display:inline-flex; padding:21px 38px; border-radius:20px;
+             background:rgba(43,127,255,.13); border:2px solid rgba(43,127,255,.48);
+             box-shadow:inset 0 0 70px rgba(43,127,255,.16), 0 10px 40px rgba(0,0,0,.35) }
+  .handle span { font-size:44px; font-weight:800; color:#fff }
+  .sub { margin-top:32px; font-size:32px; color:#93a6c2; line-height:1.45 }
+  .sub b { color:#2b7fff; font-weight:600 }
+  .art { position:absolute; right:34px; top:168px; width:660px; height:820px }
+</style></head>
+<body><div class="stage">
+
+  <div class="streak" style="left:1095px"></div>
+  <div class="streak" style="left:1268px; width:84px; opacity:.65"></div>
+
+  <svg class="art" viewBox="-330 -410 660 820">
+    <defs>
+      <linearGradient id="face" x1=".1" y1="0" x2=".75" y2="1">
+        <stop offset="0"   stop-color="#55a3ff"/>
+        <stop offset=".42" stop-color="#2176e8"/>
+        <stop offset="1"   stop-color="#0c3f8e"/>
+      </linearGradient>
+      <linearGradient id="side" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#0b2d63"/><stop offset="1" stop-color="#05193c"/>
+      </linearGradient>
+      <radialGradient id="halo">
+        <stop offset="0"   stop-color="#1a4d9c" stop-opacity=".9"/>
+        <stop offset=".62" stop-color="#112f63" stop-opacity=".45"/>
+        <stop offset="1"   stop-color="#0a1830" stop-opacity="0"/>
+      </radialGradient>
+      <filter id="soft" x="-70%" y="-70%" width="240%" height="240%">
+        <feGaussianBlur stdDeviation="24"/>
+      </filter>
+      <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur stdDeviation="30"/>
+      </filter>
+    </defs>
+
+    <circle cx="0" cy="-60" r="286" fill="url(#halo)"/>
+    <circle cx="0" cy="-60" r="252" fill="#0a1527" opacity=".55"/>
+    <path d="M 0.0,-308.0 L 62.9,-146.6 L 235.9,-136.6 L 101.8,-26.9 L 145.8,140.6 L 0.0,47.0 L -145.8,140.6 L -101.8,-26.9 L -235.9,-136.6 L -62.9,-146.6 Z" fill="#1b63c8" filter="url(#glow)" opacity=".35"/>
+
+    <path d="M 0.0,-308.0 L 62.9,-146.6 L 235.9,-136.6 L 101.8,-26.9 L 145.8,140.6 L 0.0,47.0 L -145.8,140.6 L -101.8,-26.9 L -235.9,-136.6 L -62.9,-146.6 Z" transform="translate(20,16)" fill="url(#side)"
+          stroke="url(#side)" stroke-width="22" stroke-linejoin="round"/>
+    <path d="M 0.0,-308.0 L 62.9,-146.6 L 235.9,-136.6 L 101.8,-26.9 L 145.8,140.6 L 0.0,47.0 L -145.8,140.6 L -101.8,-26.9 L -235.9,-136.6 L -62.9,-146.6 Z" fill="url(#face)" stroke="url(#face)"
+          stroke-width="22" stroke-linejoin="round"/>
+    <path d="M 0.0,-308.0 L 62.9,-146.6 L 235.9,-136.6 L 101.8,-26.9 L 145.8,140.6 L 0.0,47.0 L -145.8,140.6 L -101.8,-26.9 L -235.9,-136.6 L -62.9,-146.6 Z" fill="none" stroke="#8cc0ff" stroke-width="2.5"
+          stroke-linejoin="round" opacity=".45"/>
+
+    <path d="M 0.0,-30.0 L 7.6,-10.5 L 28.5,-9.3 L 12.4,4.0 L 17.6,24.3 L 0.0,13.0 L -17.6,24.3 L -12.4,4.0 L -28.5,-9.3 L -7.6,-10.5 Z" transform="translate(-236,-258)" fill="#2f6fd0"
+          stroke="#2f6fd0" stroke-width="9" stroke-linejoin="round" opacity=".9"/>
+    <path d="M 0.0,-22.0 L 5.6,-7.7 L 20.9,-6.8 L 9.0,2.9 L 12.9,17.8 L 0.0,9.5 L -12.9,17.8 L -9.0,2.9 L -20.9,-6.8 L -5.6,-7.7 Z" transform="translate(248,-300)" fill="#1d4f9e"
+          stroke="#1d4f9e" stroke-width="7" stroke-linejoin="round" opacity=".85"/>
+
+    <ellipse cx="6" cy="258" rx="208" ry="30" fill="#02050e"
+             opacity=".9" filter="url(#soft)"/>
+    <g transform="translate(0,196)">
+      <path d="M -188,0 L 188,0 L 200,14 L -200,14 Z" fill="#1a2944"/>
+      <path d="M -200,14 L 200,14 L 162,62 L -162,62 Z" fill="#0b1324"/>
+    </g>
+  </svg>
+
+  <div class="logo">
+    <div>
+      <div class="ara">ARA</div><div class="st">STARS</div>
+    </div>
+    <svg width="100" height="100" viewBox="-56 -56 112 112">
+      <path d="M 0.0,-46.0 L 11.8,-16.2 L 43.7,-14.2 L 19.0,6.2 L 27.0,37.2 L 0.0,20.0 L -27.0,37.2 L -19.0,6.2 L -43.7,-14.2 L -11.8,-16.2 Z" fill="none" stroke="#2b7fff" stroke-width="9" stroke-linejoin="round"/>
+    </svg>
+  </div>
+
+  <div class="left">
+    <h1>СЛУЖБА<br><span class="accent">ПОДДЕРЖКИ</span></h1>
+    <div class="rule"><i></i>
+      <svg width="26" height="26" viewBox="-15 -15 30 30"><path d="M 0.0,-13.0 L 3.3,-4.5 L 12.4,-4.0 L 5.3,1.7 L 7.6,10.5 L 0.0,5.6 L -7.6,10.5 L -5.3,1.7 L -12.4,-4.0 L -3.3,-4.5 Z" fill="#2b7fff"/></svg>
+      <i class="r"></i></div>
+    <div class="handle"><span>@AraStarsS_Manager</span></div>
+    <div class="sub">Вопросы по заказу, оплате и выводу —<br>пишите, отвечаем <b>быстро</b></div>
+  </div>
+
+</div></body></html>
