@@ -53,6 +53,10 @@
           background-position:-54px -93px;
           /* логотип светлый на почти чёрном: screen гасит фон выреза
              до нуля, поэтому прямоугольник не проступает ни на какой теме */
+          /* contrast давит фон выреза в чистый чёрный: иначе screen
+             подмешивает слабую подсветку вокруг букв и вырез
+             проступает прямоугольником на светлой теме */
+          filter:contrast(1.45) brightness(1.04);
           mix-blend-mode:screen;
           -webkit-mask-image:
             linear-gradient(to right, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%),
