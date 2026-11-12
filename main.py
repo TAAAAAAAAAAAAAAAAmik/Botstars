@@ -16,7 +16,7 @@ from typing import Optional
 import aiohttp
 import requests
 from dotenv import dotenv_values, load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from fragment_service import (
@@ -25,6 +25,7 @@ from fragment_service import (
     normalize_recipient,
     search_stars_recipient,
 )
+from payment_providers import build_provider
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _ENV_PATH = os.path.join(BASE_DIR, ".env")
@@ -71,10 +72,23 @@ PAYMENT_COMMENT_PREFIX = "ARA"
 PAYMENT_WATCHER_TASK: asyncio.Task | None = None
 OZON_COOKIE_KEEPALIVE_TASK: asyncio.Task | None = None
 OZON_CHECK_LOCK: asyncio.Lock | None = None
+SETTLEMENT_LOCK: asyncio.Lock | None = None
 OZON_DRIVER = None
 OZON_LAST_COOKIE_SAVE_MONOTONIC = 0.0
 ADMIN_STATS_CACHE: dict[str, object] = {"expires_at": 0.0, "value": None}
 OZON_ENABLED = OZON_USE_SELENIUM or bool(OZON_COOKIES_JSON)
+
+# Which source of incoming-payment events to use. Left unset, it resolves to
+# the legacy Ozon scraper whenever Ozon credentials are configured, so an
+# existing .env keeps working untouched; otherwise payments are confirmed by
+# the admin by hand. See payment_providers.py for the options.
+PAYMENT_PROVIDER_NAME = (
+    os.getenv("PAYMENT_PROVIDER", "").strip().lower()
+    or ("ozon" if OZON_ENABLED else "manual")
+)
+# Built at startup, once fetch_ozon_operations() exists to be injected.
+PAYMENT_PROVIDER = None
+
 OZON_HEALTH: dict[str, object] = {
     "enabled": OZON_ENABLED,
     "mode": "selenium" if OZON_USE_SELENIUM else "cookies",
@@ -280,6 +294,19 @@ def get_ozon_check_lock() -> asyncio.Lock:
     if OZON_CHECK_LOCK is None:
         OZON_CHECK_LOCK = asyncio.Lock()
     return OZON_CHECK_LOCK
+
+
+def get_settlement_lock() -> asyncio.Lock:
+    """Serializes settlement across every payment source.
+
+    The poller and the webhook endpoint can both be settling at once, and each
+    reads a snapshot of the pending list; without this, two operations arriving
+    together could be credited against the same order.
+    """
+    global SETTLEMENT_LOCK
+    if SETTLEMENT_LOCK is None:
+        SETTLEMENT_LOCK = asyncio.Lock()
+    return SETTLEMENT_LOCK
 
 
 def parse_ozon_cookie_input(raw: str) -> dict[str, str]:
@@ -3237,23 +3264,19 @@ async def process_matched_payment(payment: dict, operation: dict) -> None:
         await notify_admin_payment_error(payment["kind"], payment["id"], exc)
 
 
-async def run_ozon_payment_check_once() -> None:
-    async with get_ozon_check_lock():
-        operations = await fetch_ozon_operations()
+async def settle_operations(operations: list[dict]) -> tuple[int, int]:
+    """Match incoming operations against pending payments and settle them.
+
+    Source-independent: the Ozon poller and the webhook endpoint both hand
+    operations here in the canonical shape (see payment_providers.py), so
+    settlement behaves identically whichever provider is active. Returns
+    (matched_count, pending_count).
+
+    Idempotent by operation id, so replaying the same callback is harmless.
+    """
+    async with get_settlement_lock():
         pending = get_pending_payments()
         matched_count = 0
-        OZON_HEALTH.update(
-            {
-                "enabled": True,
-                "last_success_at": now_iso(),
-                "last_error": None,
-                "last_operations_count": len(operations),
-                "last_checked_at": now_iso(),
-                "last_pending_count": len(pending),
-                "last_matched_count": 0,
-            }
-        )
-
         for payment in pending:
             for operation in operations:
                 operation_id = make_operation_id(operation)
@@ -3263,10 +3286,34 @@ async def run_ozon_payment_check_once() -> None:
                     await process_matched_payment(payment, operation)
                     matched_count += 1
                     break
+        return matched_count, len(pending)
+
+
+async def run_ozon_payment_check_once() -> None:
+    async with get_ozon_check_lock():
+        operations = await fetch_ozon_operations()
+        OZON_HEALTH.update(
+            {
+                "enabled": True,
+                "last_success_at": now_iso(),
+                "last_error": None,
+                "last_operations_count": len(operations),
+                "last_checked_at": now_iso(),
+                "last_matched_count": 0,
+            }
+        )
+        matched_count, pending_count = await settle_operations(operations)
+        OZON_HEALTH["last_pending_count"] = pending_count
         OZON_HEALTH["last_matched_count"] = matched_count
 
 
 async def ozon_payment_watcher_loop() -> None:
+    if PAYMENT_PROVIDER is not None and PAYMENT_PROVIDER.mode != "pull":
+        logger.info(
+            "Ozon payment watcher is disabled: PAYMENT_PROVIDER=%s",
+            PAYMENT_PROVIDER.describe(),
+        )
+        return
     if not OZON_ENABLED:
         logger.warning("Ozon payment watcher is disabled: no Selenium profile or cookies configured")
         return
@@ -3332,7 +3379,14 @@ init_db()
 
 @app.on_event("startup")
 async def startup_payment_watcher() -> None:
-    global PAYMENT_WATCHER_TASK, OZON_COOKIE_KEEPALIVE_TASK
+    global PAYMENT_WATCHER_TASK, OZON_COOKIE_KEEPALIVE_TASK, PAYMENT_PROVIDER
+    if PAYMENT_PROVIDER is None:
+        PAYMENT_PROVIDER = build_provider(
+            name=PAYMENT_PROVIDER_NAME,
+            ozon_fetcher=fetch_ozon_operations,
+            ozon_health=OZON_HEALTH,
+        )
+        logger.info("Payment provider: %s", PAYMENT_PROVIDER.describe())
     if PAYMENT_WATCHER_TASK is None:
         PAYMENT_WATCHER_TASK = asyncio.create_task(ozon_payment_watcher_loop())
     if OZON_COOKIE_KEEPALIVE_TASK is None:
@@ -3372,6 +3426,60 @@ async def health():
         "users_count": count_users(),
         "db_path": os.path.abspath(DB_PATH),
         "time": now_iso(),
+    }
+
+
+@app.get("/payments/health")
+async def payments_health():
+    """Which payment source is live, whatever it is."""
+    if PAYMENT_PROVIDER is None:
+        return {"ok": False, "error": "Payment provider is not initialised yet"}
+    return {"ok": True, **PAYMENT_PROVIDER.health()}
+
+
+@app.post("/payments/webhook")
+async def payments_webhook(request: Request):
+    """Incoming-payment callback from a bank or aggregator.
+
+    The signature is verified over the exact request body before the payload is
+    parsed, and settlement is idempotent by operation id, so a provider
+    retrying a delivery cannot double-credit an order.
+    """
+    provider = PAYMENT_PROVIDER
+    if provider is None or provider.mode != "push":
+        raise HTTPException(status_code=404, detail="No webhook payment provider is enabled")
+
+    body = await request.body()
+    if not provider.verify_signature(body, dict(request.headers)):
+        logger.warning(
+            "Rejected payment webhook: bad or missing signature (%s bytes)", len(body)
+        )
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    try:
+        payload = json.loads(body.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="Body is not valid JSON")
+
+    operations = provider.normalize_event(payload)
+    if not operations:
+        # Answer 200 so the provider stops retrying: the delivery was read, it
+        # simply held nothing chargeable (a fee, a debit, an unrelated event).
+        logger.info("Payment webhook carried no creditable operation")
+        return {"ok": True, "received": 0, "matched": 0}
+
+    matched_count, pending_count = await settle_operations(operations)
+    logger.info(
+        "Payment webhook: received=%s matched=%s pending=%s",
+        len(operations),
+        matched_count,
+        pending_count,
+    )
+    return {
+        "ok": True,
+        "received": len(operations),
+        "matched": matched_count,
+        "pending": pending_count,
     }
 
 
