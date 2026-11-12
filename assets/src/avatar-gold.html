@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<!--
+  Круглая аватарка AraStars, 768x768.
+
+  Собрана из ../welcome-gold.png: логотип и звезда — исходные пиксели.
+  Убрано всё, что в круге не читается: заголовок, плашка с ником,
+  подпись, разделитель.
+
+  Пересборка:
+    cd assets/src
+    npx playwright screenshot --viewport-size=768,768 avatar.html ../avatar.png
+-->
+<style>
+  * { margin:0; padding:0; box-sizing:border-box }
+  body { width:768px; height:768px; overflow:hidden;
+         font-family:'Inter Display','Inter',sans-serif }
+
+  .av { position:relative; width:768px; height:768px; overflow:hidden;
+        background:
+          radial-gradient(540px 540px at 50% 56%, #3c2a0a 0%, rgba(40,28,8,0) 72%),
+          linear-gradient(150deg,#000000 0%,#070502 55%,#0e0a04 100%);
+        background-color:#000000 }
+
+  /* размытая подложка из того же кадра: под краем .src должна быть
+     фактура, иначе стык читается вертикальной линией */
+  .bg { position:absolute; inset:-50px; background:url(../welcome-gold.png) center/cover;
+        filter:blur(26px) brightness(.26) saturate(.75) }
+
+  /* исходник целиком, масштаб 0.62; центр звезды (1114,594) -> (384,520) */
+  .src { position:absolute; left:-307px; top:152px; width:898px; height:673px;
+         -webkit-mask-image:
+           linear-gradient(to right, #000 calc(100% - 42px), transparent 100%),
+           linear-gradient(to bottom, transparent 0, #000 54px, #000 100%);
+         -webkit-mask-composite:source-in;
+                 mask-image:
+           linear-gradient(to right, #000 calc(100% - 42px), transparent 100%),
+           linear-gradient(to bottom, transparent 0, #000 54px, #000 100%);
+                 mask-composite:intersect }
+
+  /* хвост старого заголовка: исходник до x=838 -> холст до 213;
+     левый луч звезды начинается с 221, поэтому край держим на 218 */
+  .patch { position:absolute; left:0; top:0; width:218px; height:768px;
+           background:linear-gradient(180deg,#000000,#060402 60%,#0c0803);
+           -webkit-mask-image:linear-gradient(to right,#000 215px,transparent 218px);
+                   mask-image:linear-gradient(to right,#000 215px,transparent 218px) }
+
+  /* логотип: берём область с запасом (x 55..495, y 95..310), масштаб 0.98,
+     края растушёваны на 20px — иначе вырез виден прямоугольником */
+  .logo { position:absolute; left:170px; top:53px; width:432px; height:211px;
+          background-image:url(../welcome-gold.png);
+          background-size:1422px auto;
+          background-position:-54px -93px;
+          /* логотип светлый на почти чёрном: screen гасит фон выреза
+             до нуля, поэтому прямоугольник не проступает ни на какой теме */
+          mix-blend-mode:screen;
+          -webkit-mask-image:
+            linear-gradient(to right, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%),
+            linear-gradient(to bottom, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%);
+          -webkit-mask-composite:source-in;
+                  mask-image:
+            linear-gradient(to right, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%),
+            linear-gradient(to bottom, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%);
+                  mask-composite:intersect }
+
+  /* Golos Text — кириллица тех же квадратных пропорций, что в оригинале;
+     Montserrat и прочие гротески рядом с маркой читаются как чужие */
+  @font-face { font-family:'Golos'; font-weight:700; font-style:normal;
+               font-display:block;
+               src:url(fonts/golos-text-cyrillic-700-normal.woff2) format('woff2') }
+
+  /* Подпись набрана ровно в ширину марки (219..549) и растянута по буквам:
+     так она читается частью логотипа, а не наклейкой поверх картинки.
+     Кегль намеренно мелкий — подпись не должна спорить с маркой. */
+  .label { position:absolute; left:219px; top:248px; width:330px;
+           display:flex; justify-content:space-between;
+           font-family:'Golos',sans-serif; font-weight:700;
+           font-size:34px; line-height:1; color:#e4caa0;
+           text-shadow:0 2px 7px rgba(0,0,0,.8) }
+  .label i { font-style:normal }
+
+  .vignette { position:absolute; inset:0; pointer-events:none;
+              background:radial-gradient(circle at 50% 50%,
+                 rgba(0,0,0,0) 54%, rgba(0,0,0,.42) 79%,
+                 rgba(0,0,0,.8) 93%, rgba(0,0,0,.95) 100%) }
+</style></head>
+<body><div class="av">
+  <div class="bg"></div>
+  <img class="src" src="../welcome-gold.png" alt="">
+  <div class="patch"></div>
+  <div class="logo"></div>
+  <div class="label"><i>П</i><i>О</i><i>Д</i><i>Д</i><i>Е</i><i>Р</i><i>Ж</i><i>К</i><i>А</i></div>
+  <div class="vignette"></div>
+</div></body></html>

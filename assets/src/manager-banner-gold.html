@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<!--
+  Баннер поддержки AraStars.
+
+  Строится ПОВЕРХ ../welcome-gold.png: вся правая часть (звезда, диск, постамент,
+  малые звёзды, блики) и логотип остаются исходными пикселями. Закрывается
+  только блок старого текста слева — до x=844, где начинается тёмный диск.
+
+  Пересборка:
+    cd assets/src
+    npx playwright screenshot --viewport-size=1448,1086 \
+        manager-banner.html ../manager.png
+-->
+<style>
+  * { margin:0; padding:0; box-sizing:border-box }
+  body { width:1448px; height:1086px; overflow:hidden;
+         font-family:'Inter Display','Inter',sans-serif }
+
+  .stage { position:relative; width:1448px; height:1086px; overflow:hidden }
+
+  /* оригинал как основа — ничего в нём не перерисовывается */
+  .base { position:absolute; inset:0; width:1448px; height:1086px; display:block }
+
+  /* заплатка на месте старого заголовка; цвет снят пипеткой с соседнего фона */
+  .patch {
+    position:absolute; left:0; top:270px; width:844px; height:646px;
+    background:linear-gradient(158deg,#000000 0%,#010100 45%,#040300 78%,#080500 100%);
+    -webkit-mask-image:linear-gradient(to bottom,
+        transparent 0, #000 18px, #000 calc(100% - 30px), transparent 100%);
+            mask-image:linear-gradient(to bottom,
+        transparent 0, #000 18px, #000 calc(100% - 30px), transparent 100%);
+  }
+
+  .left { position:absolute; left:104px; top:352px; width:760px }
+  h1 { font-size:98px; font-weight:800; line-height:1.0; color:#fff;
+       letter-spacing:-.015em; text-shadow:0 8px 44px rgba(0,0,0,.7) }
+  h1 .accent { color:#deb45c }
+
+  .rule { display:flex; align-items:center; gap:14px; margin:42px 0 30px; width:430px }
+  .rule i { flex:1; height:2px; background:linear-gradient(90deg,#deb45c,rgba(222,180,92,0)) }
+  .rule i.r { background:linear-gradient(270deg,#deb45c,rgba(222,180,92,0)) }
+
+  .handle { display:inline-flex; padding:21px 38px; border-radius:20px;
+            background:rgba(222,180,92,.14); border:2px solid rgba(222,180,92,.5);
+            box-shadow:inset 0 0 70px rgba(222,180,92,.17), 0 10px 40px rgba(0,0,0,.4) }
+  .handle span { font-size:43px; font-weight:800; color:#fff }
+
+  .sub { margin-top:32px; font-size:31px; color:#a08d6b; line-height:1.45 }
+  .sub b { color:#deb45c; font-weight:600 }
+</style></head>
+<body><div class="stage">
+
+  <img class="base" src="../welcome-gold.png" alt="">
+  <div class="patch"></div>
+
+  <div class="left">
+    <h1>СЛУЖБА<br><span class="accent">ПОДДЕРЖКИ</span></h1>
+    <div class="rule"><i></i>
+      <svg width="26" height="26" viewBox="-15 -15 30 30">
+        <path d="M 0.0,-13.0 L 3.3,-4.5 L 12.4,-4.0 L 5.3,1.7 L 7.6,10.5 L 0.0,5.6 L -7.6,10.5 L -5.3,1.7 L -12.4,-4.0 L -3.3,-4.5 Z" fill="#deb45c"/>
+      </svg>
+      <i class="r"></i></div>
+    <div class="handle"><span>@AraStarsS_Manager</span></div>
+    <div class="sub">Вопросы по заказу, оплате и выводу —<br>пишите, отвечаем <b>быстро</b></div>
+  </div>
+
+</div></body></html>
