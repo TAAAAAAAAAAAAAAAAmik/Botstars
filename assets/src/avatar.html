@@ -63,12 +63,21 @@
             linear-gradient(to bottom, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%);
                   mask-composite:intersect }
 
-  /* подпись под маркой; на 96px не прочитается, но держит композицию */
-  .label { position:absolute; left:0; right:0; top:254px; text-align:center;
-           font-size:45px; font-weight:700; letter-spacing:.2em;
-           text-indent:.2em;                       /* компенсирует трекинг справа */
-           color:#2f87f0; text-transform:uppercase;
-           text-shadow:0 0 34px rgba(47,135,240,.5), 0 2px 10px rgba(0,0,0,.6) }
+  /* Golos Text — кириллица тех же квадратных пропорций, что в оригинале;
+     Montserrat и прочие гротески рядом с маркой читаются как чужие */
+  @font-face { font-family:'Golos'; font-weight:700; font-style:normal;
+               font-display:block;
+               src:url(fonts/golos-text-cyrillic-700-normal.woff2) format('woff2') }
+
+  /* Подпись набрана ровно в ширину марки (219..549) и растянута по буквам:
+     так она читается частью логотипа, а не наклейкой поверх картинки.
+     Кегль намеренно мелкий — подпись не должна спорить с маркой. */
+  .label { position:absolute; left:219px; top:248px; width:330px;
+           display:flex; justify-content:space-between;
+           font-family:'Golos',sans-serif; font-weight:700;
+           font-size:34px; line-height:1; color:#aecae8;
+           text-shadow:0 2px 7px rgba(0,0,0,.8) }
+  .label i { font-style:normal }
 
   .vignette { position:absolute; inset:0; pointer-events:none;
               background:radial-gradient(circle at 50% 50%,
@@ -80,6 +89,6 @@
   <img class="src" src="../welcome.png" alt="">
   <div class="patch"></div>
   <div class="logo"></div>
-  <div class="label">Поддержка</div>
+  <div class="label"><i>П</i><i>О</i><i>Д</i><i>Д</i><i>Е</i><i>Р</i><i>Ж</i><i>К</i><i>А</i></div>
   <div class="vignette"></div>
 </div></body></html>
