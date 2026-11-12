@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<!--
+  Круглая аватарка бота AraStars, плоский вектор, 768x768.
+
+  Другая подача, не студийный рендер: все формы отрисованы здесь,
+  из welcome.png ничего не берётся. Смешивать рендер с векторной
+  графикой нельзя — получается мультяшно, это разные языки.
+
+  Фоновые искры намеренно мелкие и целиком попадают в круг. Крупные,
+  уходящие за край, не работают: обрезка оставляет в кадре промежутки
+  между лучами, и форма читается кляксой, а не звездой.
+
+  Пересборка:
+    npx playwright screenshot --viewport-size=768,768 \
+        avatar-bot-flat.html ../avatar-bot-flat.png
+-->
+<style>
+  * { margin:0; padding:0; box-sizing:border-box }
+  body { width:768px; height:768px; overflow:hidden;
+         font-family:'Inter Display','Inter',sans-serif }
+  .av { position:relative; width:768px; height:768px; overflow:hidden;
+        background:radial-gradient(660px 660px at 44% 32%, #121b33 0%, #070a16 60%, #04050d 100%) }
+  svg.art { position:absolute; inset:0 }
+  .mark { position:absolute; left:0; right:0; top:512px; text-align:center;
+          font-size:80px; font-weight:800; letter-spacing:-.025em; line-height:1;
+          color:#fff; text-shadow:0 4px 24px rgba(0,0,0,.55) }
+  .mark em { font-style:normal;
+             background:linear-gradient(180deg,#b3dcff,#4e97ff);
+             -webkit-background-clip:text; background-clip:text; color:transparent }
+  .pill { position:absolute; left:50%; transform:translateX(-50%); top:618px;
+          padding:11px 32px 13px; border-radius:999px;
+          background:linear-gradient(180deg,#63acff,#2170e2);
+          font-size:27px; font-weight:800; letter-spacing:.18em; color:#05152f;
+          box-shadow:0 8px 26px rgba(33,112,226,.38) }
+</style></head>
+<body><div class="av">
+  <svg class="art" viewBox="0 0 768 768">
+    <defs>
+      <linearGradient id="star" x1=".18" y1="0" x2=".82" y2="1">
+        <stop offset="0"   stop-color="#a8d7ff"/>
+        <stop offset=".40" stop-color="#4490f7"/>
+        <stop offset="1"   stop-color="#1550bb"/>
+      </linearGradient>
+      <filter id="soft" x="-45%" y="-45%" width="190%" height="190%">
+        <feGaussianBlur stdDeviation="26"/>
+      </filter>
+    </defs>
+
+    <g opacity="1">
+      <path d="M 160.6,104.4 Q 154.9,182.0 226.9,152.6 Q 156.9,186.5 218.3,234.2 Q 154.0,190.5 143.4,267.6 Q 149.1,190.0 77.1,219.4 Q 147.1,185.5 85.7,137.8 Q 150.0,181.5 160.6,104.4 Z" fill="#16294e"/>
+      <path d="M 654.8,225.8 Q 626.4,312.3 716.5,299.3 Q 627.4,318.0 683.7,389.5 Q 623.0,321.7 589.2,406.2 Q 617.6,319.7 527.5,332.7 Q 616.6,314.0 560.3,242.5 Q 621.0,310.3 654.8,225.8 Z" fill="#142548"/>
+      <path d="M 198.0,404.0 Q 201.7,448.3 246.0,452.0 Q 201.7,455.7 198.0,500.0 Q 194.3,455.7 150.0,452.0 Q 194.3,448.3 198.0,404.0 Z" fill="#13223f"/>
+      <path d="M 642.1,472.3 Q 651.9,523.2 703.7,522.1 Q 652.8,531.9 653.9,583.7 Q 644.1,532.8 592.3,533.9 Q 643.2,524.1 642.1,472.3 Z" fill="#12203c"/>
+      <path d="M 470.0,578.0 Q 472.6,609.4 504.0,612.0 Q 472.6,614.6 470.0,646.0 Q 467.4,614.6 436.0,612.0 Q 467.4,609.4 470.0,578.0 Z" fill="#111d36"/>
+    </g>
+
+    <path d="M 372.3,156.5 Q 384.0,126.0 395.7,156.5 L 423.3,228.4 Q 432.2,251.7 457.1,253.0 L 534.0,257.0 Q 566.6,258.7 541.2,279.2 L 481.4,327.6 Q 462.0,343.3 468.5,367.4 L 488.4,441.8 Q 496.9,473.3 469.5,455.5 L 404.9,413.6 Q 384.0,400.0 363.1,413.6 L 298.5,455.5 Q 271.1,473.3 279.6,441.8 L 299.5,367.4 Q 306.0,343.3 286.6,327.6 L 226.8,279.2 Q 201.4,258.7 234.0,257.0 L 310.9,253.0 Q 335.8,251.7 344.7,228.4 Z" fill="#3a86f0" filter="url(#soft)" opacity=".5"/>
+    <path d="M 372.3,156.5 Q 384.0,126.0 395.7,156.5 L 423.3,228.4 Q 432.2,251.7 457.1,253.0 L 534.0,257.0 Q 566.6,258.7 541.2,279.2 L 481.4,327.6 Q 462.0,343.3 468.5,367.4 L 488.4,441.8 Q 496.9,473.3 469.5,455.5 L 404.9,413.6 Q 384.0,400.0 363.1,413.6 L 298.5,455.5 Q 271.1,473.3 279.6,441.8 L 299.5,367.4 Q 306.0,343.3 286.6,327.6 L 226.8,279.2 Q 201.4,258.7 234.0,257.0 L 310.9,253.0 Q 335.8,251.7 344.7,228.4 Z" fill="url(#star)"/>
+    <path d="M 566.0,138.0 Q 570.4,185.6 618.0,190.0 Q 570.4,194.4 566.0,242.0 Q 561.6,194.4 514.0,190.0 Q 561.6,185.6 566.0,138.0 Z" fill="#ffffff"/>
+  </svg>
+
+  <div class="mark">ara<em>stars</em></div>
+  <div class="pill">TELEGRAM</div>
+</div></body></html>
